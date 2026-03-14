@@ -1,0 +1,343 @@
+diff --git a/django/http/response.py b/django/http/response.py
+index 6a84e193ba..3d77dca238 100644
+--- a/django/http/response.py
++++ b/django/http/response.py
+@@ -233,6 +233,9 @@ class HttpResponseBase:
+             return bytes(value)
+         if isinstance(value, str):
+             return bytes(value.encode(self.charset))
++        # Handle memoryview and bytearray objects.
++        if isinstance(value, (memoryview, bytearray)):
++            return bytes(value)
+         # Handle non-string types.
+         return str(value).encode(self.charset)
+ 
+@@ -309,7 +312,7 @@ class HttpResponse(HttpResponseBase):
+     @content.setter
+     def content(self, value):
+         # Consume iterators upon assignment to allow repeated iteration.
+-        if hasattr(value, '__iter__') and not isinstance(value, (bytes, str)):
++        if hasattr(value, '__iter__') and not isinstance(value, (bytes, str, memoryview, bytearray)):
+             content = b''.join(self.make_bytes(chunk) for chunk in value)
+             if hasattr(value, 'close'):
+                 try:
+diff --git a/fix_memoryview.py b/fix_memoryview.py
+new file mode 100644
+index 0000000000..732ec8ef76
+--- /dev/null
++++ b/fix_memoryview.py
+@@ -0,0 +1,63 @@
++#!/usr/bin/env python
++"""
++Tool to fix the memoryview and bytearray handling in HttpResponse.
++"""
++
++import sys
++
++def fix_content_setter():
++    """Fix the content setter in django/http/response.py"""
++    
++    # Read the file
++    with open('/testbed/django/http/response.py', 'r') as f:
++        content = f.read()
++    
++    # Find and replace the content setter
++    old_setter = '''    @content.setter
++    def content(self, value):
++        # Consume iterators upon assignment to allow repeated iteration.
++        if hasattr(value, '__iter__') and not isinstance(value, (bytes, str)):
++            content = b''.join(self.make_bytes(chunk) for chunk in value)
++            if hasattr(value, 'close'):
++                try:
++                    value.close()
++                except Exception:
++                    pass
++        else:
++            content = self.make_bytes(value)
++        # Create a list of properly encoded bytestrings to support write().
++        self._container = [content]'''
++    
++    new_setter = '''    @content.setter
++    def content(self, value):
++        # Consume iterators upon assignment to allow repeated iteration.
++        if hasattr(value, '__iter__') and not isinstance(value, (bytes, str, memoryview, bytearray)):
++            content = b''.join(self.make_bytes(chunk) for chunk in value)
++            if hasattr(value, 'close'):
++                try:
++                    value.close()
++                except Exception:
++                    pass
++        else:
++            content = self.make_bytes(value)
++        # Create a list of properly encoded bytestrings to support write().
++        self._container = [content]'''
++    
++    if old_setter not in content:
++        print("ERROR: Could not find the content setter to replace!")
++        return False
++    
++    content = content.replace(old_setter, new_setter)
++    
++    # Write the file back
++    with open('/testbed/django/http/response.py', 'w') as f:
++        f.write(content)
++    
++    print("Successfully fixed the content setter!")
++    return True
++
++if __name__ == '__main__':
++    if fix_content_setter():
++        sys.exit(0)
++    else:
++        sys.exit(1)
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..a2d988fc4d
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,49 @@
++#!/usr/bin/env python
++"""Script to reproduce the memoryview issue with HttpResponse"""
++import sys
++sys.path.insert(0, '/testbed')
++
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        SECRET_KEY='test-secret-key',
++        DEFAULT_CHARSET='utf-8',
++    )
++    django.setup()
++
++from django.http import HttpResponse
++
++# Test 1: String content
++print("Test 1: String content")
++response = HttpResponse("My Content")
++print(f"  response.content = {response.content}")
++print(f"  Expected: b'My Content'")
++print(f"  Match: {response.content == b'My Content'}")
++print()
++
++# Test 2: Bytes content
++print("Test 2: Bytes content")
++response = HttpResponse(b"My Content")
++print(f"  response.content = {response.content}")
++print(f"  Expected: b'My Content'")
++print(f"  Match: {response.content == b'My Content'}")
++print()
++
++# Test 3: memoryview content
++print("Test 3: memoryview content")
++response = HttpResponse(memoryview(b"My Content"))
++print(f"  response.content = {response.content}")
++print(f"  Expected: b'My Content'")
++print(f"  Match: {response.content == b'My Content'}")
++print()
++
++# Test 4: bytearray content (similar to memoryview)
++print("Test 4: bytearray content")
++response = HttpResponse(bytearray(b"My Content"))
++print(f"  response.content = {response.content}")
++print(f"  Expected: b'My Content'")
++print(f"  Match: {response.content == b'My Content'}")
+diff --git a/test_memoryview_fix.py b/test_memoryview_fix.py
+new file mode 100644
+index 0000000000..8791257c14
+--- /dev/null
++++ b/test_memoryview_fix.py
+@@ -0,0 +1,120 @@
++#!/usr/bin/env python
++"""Comprehensive test for memoryview and bytearray handling in HttpResponse"""
++import sys
++sys.path.insert(0, '/testbed')
++
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        SECRET_KEY='test-secret-key',
++        DEFAULT_CHARSET='utf-8',
++    )
++    django.setup()
++
++from django.http import HttpResponse
++
++def test_memoryview():
++    """Test memoryview content"""
++    content = memoryview(b"Test Content")
++    response = HttpResponse(content)
++    assert response.content == b"Test Content", f"Expected b'Test Content', got {response.content}"
++    print("[PASS] memoryview test passed")
++
++def test_bytearray():
++    """Test bytearray content"""
++    content = bytearray(b"Test Content")
++    response = HttpResponse(content)
++    assert response.content == b"Test Content", f"Expected b'Test Content', got {response.content}"
++    print("[PASS] bytearray test passed")
++
++def test_bytes():
++    """Test bytes content"""
++    content = b"Test Content"
++    response = HttpResponse(content)
++    assert response.content == b"Test Content", f"Expected b'Test Content', got {response.content}"
++    print("[PASS] bytes test passed")
++
++def test_string():
++    """Test string content"""
++    content = "Test Content"
++    response = HttpResponse(content)
++    assert response.content == b"Test Content", f"Expected b'Test Content', got {response.content}"
++    print("[PASS] string test passed")
++
++def test_memoryview_from_bytes():
++    """Test memoryview created from bytes"""
++    original = b"Hello World"
++    content = memoryview(original)
++    response = HttpResponse(content)
++    assert response.content == original, f"Expected {original}, got {response.content}"
++    print("[PASS] memoryview from bytes test passed")
++
++def test_bytearray_modification():
++    """Test bytearray that was modified"""
++    content = bytearray(b"Original")
++    content[0:3] = b"New"
++    response = HttpResponse(content)
++    assert response.content == b"Newginal", f"Expected b'Newginal', got {response.content}"
++    print("[PASS] bytearray modification test passed")
++
++def test_nested_memoryview():
++    """Test nested memoryview"""
++    original = b"Nested"
++    content = memoryview(memoryview(original))
++    response = HttpResponse(content)
++    assert response.content == original, f"Expected {original}, got {response.content}"
++    print("[PASS] nested memoryview test passed")
++
++def test_empty_memoryview():
++    """Test empty memoryview"""
++    content = memoryview(b"")
++    response = HttpResponse(content)
++    assert response.content == b"", f"Expected b'', got {response.content}"
++    print("[PASS] empty memoryview test passed")
++
++def test_empty_bytearray():
++    """Test empty bytearray"""
++    content = bytearray(b"")
++    response = HttpResponse(content)
++    assert response.content == b"", f"Expected b'', got {response.content}"
++    print("[PASS] empty bytearray test passed")
++
++def test_list_of_bytes():
++    """Test that list of bytes still works as iterable"""
++    content = [b"Hello", b" ", b"World"]
++    response = HttpResponse(content)
++    assert response.content == b"Hello World", f"Expected b'Hello World', got {response.content}"
++    print("[PASS] list of bytes test passed")
++
++def test_generator():
++    """Test that generator still works as iterable"""
++    def gen():
++        yield b"Hello"
++        yield b" "
++        yield b"World"
++    
++    response = HttpResponse(gen())
++    assert response.content == b"Hello World", f"Expected b'Hello World', got {response.content}"
++    print("[PASS] generator test passed")
++
++if __name__ == '__main__':
++    try:
++        test_memoryview()
++        test_bytearray()
++        test_bytes()
++        test_string()
++        test_memoryview_from_bytes()
++        test_bytearray_modification()
++        test_nested_memoryview()
++        test_empty_memoryview()
++        test_empty_bytearray()
++        test_list_of_bytes()
++        test_generator()
++        print("\n[SUCCESS] All tests passed!")
++    except AssertionError as e:
++        print(f"\n[FAILED] Test failed: {e}")
++        sys.exit(1)
+diff --git a/test_streaming_memoryview.py b/test_streaming_memoryview.py
+new file mode 100644
+index 0000000000..17d4db36a7
+--- /dev/null
++++ b/test_streaming_memoryview.py
+@@ -0,0 +1,64 @@
++#!/usr/bin/env python
++"""Test memoryview handling in StreamingHttpResponse"""
++import sys
++sys.path.insert(0, '/testbed')
++
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        SECRET_KEY='test-secret-key',
++        DEFAULT_CHARSET='utf-8',
++    )
++    django.setup()
++
++from django.http import StreamingHttpResponse
++
++def test_streaming_memoryview():
++    """Test StreamingHttpResponse with memoryview content"""
++    def gen():
++        yield memoryview(b"Hello")
++        yield memoryview(b" ")
++        yield memoryview(b"World")
++    
++    response = StreamingHttpResponse(gen())
++    content = b''.join(response.streaming_content)
++    assert content == b"Hello World", f"Expected b'Hello World', got {content}"
++    print("[PASS] StreamingHttpResponse with memoryview test passed")
++
++def test_streaming_bytearray():
++    """Test StreamingHttpResponse with bytearray content"""
++    def gen():
++        yield bytearray(b"Hello")
++        yield bytearray(b" ")
++        yield bytearray(b"World")
++    
++    response = StreamingHttpResponse(gen())
++    content = b''.join(response.streaming_content)
++    assert content == b"Hello World", f"Expected b'Hello World', got {content}"
++    print("[PASS] StreamingHttpResponse with bytearray test passed")
++
++def test_streaming_mixed():
++    """Test StreamingHttpResponse with mixed content types"""
++    def gen():
++        yield b"Hello"
++        yield memoryview(b" ")
++        yield bytearray(b"World")
++    
++    response = StreamingHttpResponse(gen())
++    content = b''.join(response.streaming_content)
++    assert content == b"Hello World", f"Expected b'Hello World', got {content}"
++    print("[PASS] StreamingHttpResponse with mixed content test passed")
++
++if __name__ == '__main__':
++    try:
++        test_streaming_memoryview()
++        test_streaming_bytearray()
++        test_streaming_mixed()
++        print("\n[SUCCESS] All StreamingHttpResponse tests passed!")
++    except AssertionError as e:
++        print(f"\n[FAILED] Test failed: {e}")
++        sys.exit(1)

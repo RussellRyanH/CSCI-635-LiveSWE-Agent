@@ -1,0 +1,503 @@
+diff --git a/django/contrib/admin/sites.py b/django/contrib/admin/sites.py
+index 61be31d890..7b55647592 100644
+--- a/django/contrib/admin/sites.py
++++ b/django/contrib/admin/sites.py
+@@ -20,6 +20,7 @@ from django.utils.translation import gettext_lazy
+ from django.views.decorators.cache import never_cache
+ from django.views.decorators.common import no_append_slash
+ from django.views.decorators.csrf import csrf_protect
++from django.utils.http import escape_leading_slashes
+ from django.views.i18n import JavaScriptCatalog
+ 
+ all_sites = WeakSet()
+@@ -453,7 +454,7 @@ class AdminSite:
+                 pass
+             else:
+                 if getattr(match.func, "should_append_slash", True):
+-                    return HttpResponsePermanentRedirect("%s/" % request.path)
++                    return HttpResponsePermanentRedirect(escape_leading_slashes(request.get_full_path(force_append_slash=True)))
+         raise Http404
+ 
+     def _build_app_dict(self, request, label=None):
+diff --git a/edit_tool.py b/edit_tool.py
+new file mode 100755
+index 0000000000..d702b3fc41
+--- /dev/null
++++ b/edit_tool.py
+@@ -0,0 +1,37 @@
++#!/usr/bin/env python3
++"""
++Simple tool to edit specific lines in a file
++"""
++import sys
++
++def edit_file(filepath, line_num, new_content):
++    """Replace a specific line in a file"""
++    with open(filepath, 'r') as f:
++        lines = f.readlines()
++    
++    # Convert to 0-indexed
++    idx = line_num - 1
++    
++    if idx < 0 or idx >= len(lines):
++        print(f"Error: Line {line_num} is out of range (file has {len(lines)} lines)")
++        return False
++    
++    # Replace the line
++    lines[idx] = new_content + '\n'
++    
++    with open(filepath, 'w') as f:
++        f.writelines(lines)
++    
++    print(f"Successfully edited line {line_num}")
++    return True
++
++if __name__ == "__main__":
++    if len(sys.argv) < 4:
++        print("Usage: edit_tool.py <filepath> <line_num> <new_content>")
++        sys.exit(1)
++    
++    filepath = sys.argv[1]
++    line_num = int(sys.argv[2])
++    new_content = sys.argv[3]
++    
++    edit_file(filepath, line_num, new_content)
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..2d8842856c
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,89 @@
++"""
++Test edge cases for the query string redirect fix
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'django.contrib.admin',
++        ],
++        APPEND_SLASH=True,
++        SECRET_KEY='test-secret-key',
++        ROOT_URLCONF='test_urls',
++    )
++    django.setup()
++
++from django.test import RequestFactory
++from django.contrib.admin.sites import AdminSite
++from django.http import HttpResponsePermanentRedirect, Http404
++from unittest.mock import Mock, patch
++
++factory = RequestFactory()
++admin_site = AdminSite()
++
++# Test 1: Empty query string
++print("Test 1: Empty query string")
++request = factory.get('/admin/auth/foo?')
++request.path = '/admin/auth/foo'
++request.path_info = '/admin/auth/foo'
++request.META['QUERY_STRING'] = ''
++
++with patch('django.contrib.admin.sites.resolve') as mock_resolve:
++    mock_match = Mock()
++    mock_match.func = Mock()
++    mock_match.func.should_append_slash = True
++    mock_resolve.return_value = mock_match
++    
++    response = admin_site.catch_all_view(request, 'auth/foo')
++    print(f"  Redirect URL: {response.url}")
++    print(f"  Expected: /admin/auth/foo/")
++    print(f"  Match: {response.url == '/admin/auth/foo/'}")
++
++# Test 2: Query string with equals sign
++print("\nTest 2: Query string with equals sign")
++request = factory.get('/admin/auth/foo?key=value&another=test')
++request.path = '/admin/auth/foo'
++request.path_info = '/admin/auth/foo'
++
++with patch('django.contrib.admin.sites.resolve') as mock_resolve:
++    mock_match = Mock()
++    mock_match.func = Mock()
++    mock_match.func.should_append_slash = True
++    mock_resolve.return_value = mock_match
++    
++    response = admin_site.catch_all_view(request, 'auth/foo')
++    print(f"  Redirect URL: {response.url}")
++    print(f"  Contains query string: {'?' in response.url}")
++
++# Test 3: No APPEND_SLASH setting
++print("\nTest 3: No APPEND_SLASH setting (should raise Http404)")
++original_append_slash = settings.APPEND_SLASH
++settings.APPEND_SLASH = False
++
++request = factory.get('/admin/auth/foo?id=123')
++request.path = '/admin/auth/foo'
++request.path_info = '/admin/auth/foo'
++
++try:
++    response = admin_site.catch_all_view(request, 'auth/foo')
++    print(f"  Unexpected response: {response}")
++except Http404:
++    print(f"  Http404 raised (expected)")
++
++settings.APPEND_SLASH = original_append_slash
++
++print("\nAll edge case tests completed!")
+diff --git a/test_integration_query_string.py b/test_integration_query_string.py
+new file mode 100644
+index 0000000000..749c0c0d48
+--- /dev/null
++++ b/test_integration_query_string.py
+@@ -0,0 +1,74 @@
++"""
++Integration test for query string preservation in AdminSite.catch_all_view()
++This test simulates a real HTTP request to the admin site.
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'django.contrib.admin',
++        ],
++        APPEND_SLASH=True,
++        SECRET_KEY='test-secret-key',
++        ROOT_URLCONF='test_urls',
++        MIDDLEWARE=[],
++    )
++    django.setup()
++
++from django.test import Client, TestCase
++from django.contrib.auth.models import User
++from django.urls import path, re_path
++from django.contrib.admin.sites import AdminSite
++from django.http import HttpResponse
++
++# Create a simple admin site for testing
++admin_site = AdminSite()
++
++# Create URL patterns
++urlpatterns = [
++    path('admin/', admin_site.urls),
++]
++
++# Create a test case
++class QueryStringIntegrationTest(TestCase):
++    """Integration test for query string preservation"""
++    
++    def setUp(self):
++        self.client = Client()
++        # Create a superuser for testing
++        User.objects.create_superuser('admin', 'admin@example.com', 'password')
++    
++    def test_query_string_preserved_in_redirect(self):
++        """Test that query strings are preserved when redirecting with APPEND_SLASH"""
++        # Login as superuser
++        self.client.login(username='admin', password='password')
++        
++        # Request a URL without trailing slash but with query string
++        # This should redirect to the same URL with a trailing slash and preserve the query string
++        response = self.client.get('/admin/auth/foo?id=123', follow=False)
++        
++        # The response should be a redirect (301 or 302)
++        self.assertIn(response.status_code, [301, 302, 404])
++        
++        # If it's a redirect, check that the query string is preserved
++        if response.status_code in [301, 302]:
++            self.assertIn('?id=123', response.url)
++            self.assertTrue(response.url.endswith('/?id=123'))
++
++if __name__ == '__main__':
++    import unittest
++    unittest.main()
+diff --git a/test_query_string_comprehensive.py b/test_query_string_comprehensive.py
+new file mode 100644
+index 0000000000..a0ee16e9a7
+--- /dev/null
++++ b/test_query_string_comprehensive.py
+@@ -0,0 +1,114 @@
++"""
++Comprehensive test for query string preservation in AdminSite.catch_all_view()
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'django.contrib.admin',
++        ],
++        APPEND_SLASH=True,
++        SECRET_KEY='test-secret-key',
++        ROOT_URLCONF='test_urls',
++    )
++    django.setup()
++
++from django.test import RequestFactory, TestCase
++from django.contrib.admin.sites import AdminSite
++from django.http import HttpResponsePermanentRedirect, Http404
++from unittest.mock import Mock, patch
++
++class QueryStringRedirectTests(TestCase):
++    """Test that query strings are preserved in AdminSite.catch_all_view() redirects"""
++    
++    def setUp(self):
++        self.factory = RequestFactory()
++        self.admin_site = AdminSite()
++    
++    def test_query_string_preserved_with_single_param(self):
++        """Test that a single query parameter is preserved"""
++        request = self.factory.get('/admin/auth/foo?id=123')
++        request.path = '/admin/auth/foo'
++        request.path_info = '/admin/auth/foo'
++        
++        with patch('django.contrib.admin.sites.resolve') as mock_resolve:
++            mock_match = Mock()
++            mock_match.func = Mock()
++            mock_match.func.should_append_slash = True
++            mock_resolve.return_value = mock_match
++            
++            response = self.admin_site.catch_all_view(request, 'auth/foo')
++            
++            self.assertIsInstance(response, HttpResponsePermanentRedirect)
++            self.assertEqual(response.url, '/admin/auth/foo/?id=123')
++    
++    def test_query_string_preserved_with_multiple_params(self):
++        """Test that multiple query parameters are preserved"""
++        request = self.factory.get('/admin/auth/foo?id=123&name=test&status=active')
++        request.path = '/admin/auth/foo'
++        request.path_info = '/admin/auth/foo'
++        
++        with patch('django.contrib.admin.sites.resolve') as mock_resolve:
++            mock_match = Mock()
++            mock_match.func = Mock()
++            mock_match.func.should_append_slash = True
++            mock_resolve.return_value = mock_match
++            
++            response = self.admin_site.catch_all_view(request, 'auth/foo')
++            
++            self.assertIsInstance(response, HttpResponsePermanentRedirect)
++            self.assertEqual(response.url, '/admin/auth/foo/?id=123&name=test&status=active')
++    
++    def test_no_query_string_still_works(self):
++        """Test that URLs without query strings still work correctly"""
++        request = self.factory.get('/admin/auth/foo')
++        request.path = '/admin/auth/foo'
++        request.path_info = '/admin/auth/foo'
++        
++        with patch('django.contrib.admin.sites.resolve') as mock_resolve:
++            mock_match = Mock()
++            mock_match.func = Mock()
++            mock_match.func.should_append_slash = True
++            mock_resolve.return_value = mock_match
++            
++            response = self.admin_site.catch_all_view(request, 'auth/foo')
++            
++            self.assertIsInstance(response, HttpResponsePermanentRedirect)
++            self.assertEqual(response.url, '/admin/auth/foo/')
++    
++    def test_query_string_with_special_characters(self):
++        """Test that query strings with special characters are preserved"""
++        request = self.factory.get('/admin/auth/foo?search=hello%20world&filter=a%2Bb')
++        request.path = '/admin/auth/foo'
++        request.path_info = '/admin/auth/foo'
++        
++        with patch('django.contrib.admin.sites.resolve') as mock_resolve:
++            mock_match = Mock()
++            mock_match.func = Mock()
++            mock_match.func.should_append_slash = True
++            mock_resolve.return_value = mock_match
++            
++            response = self.admin_site.catch_all_view(request, 'auth/foo')
++            
++            self.assertIsInstance(response, HttpResponsePermanentRedirect)
++            # The URL should contain the query string
++            self.assertIn('?', response.url)
++            self.assertTrue(response.url.startswith('/admin/auth/foo/?'))
++
++if __name__ == '__main__':
++    import unittest
++    unittest.main()
+diff --git a/test_query_string_redirect.py b/test_query_string_redirect.py
+new file mode 100644
+index 0000000000..27151a9d4b
+--- /dev/null
++++ b/test_query_string_redirect.py
+@@ -0,0 +1,94 @@
++"""
++Test script to reproduce the query string redirect issue in AdminSite.catch_all_view()
++"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'django.contrib.admin',
++        ],
++        APPEND_SLASH=True,
++        SECRET_KEY='test-secret-key',
++        ROOT_URLCONF='test_urls',
++    )
++    django.setup()
++
++from django.test import RequestFactory
++from django.contrib.admin.sites import AdminSite
++from django.http import HttpResponsePermanentRedirect, Http404
++from unittest.mock import Mock, patch
++
++# Create a test request
++factory = RequestFactory()
++
++# Test case 1: URL without trailing slash but with query string
++print("Test 1: URL without trailing slash but with query string")
++print("=" * 60)
++
++# Create a mock request
++request = factory.get('/admin/auth/foo?id=123')
++request.path = '/admin/auth/foo'
++request.path_info = '/admin/auth/foo'
++request.META['QUERY_STRING'] = 'id=123'
++
++# Create an AdminSite instance
++admin_site = AdminSite()
++
++# Mock the resolve function to simulate finding a match with trailing slash
++with patch('django.contrib.admin.sites.resolve') as mock_resolve:
++    mock_match = Mock()
++    mock_match.func = Mock()
++    mock_match.func.should_append_slash = True
++    mock_resolve.return_value = mock_match
++    
++    try:
++        response = admin_site.catch_all_view(request, 'auth/foo')
++        if isinstance(response, HttpResponsePermanentRedirect):
++            print(f"Redirect URL: {response.url}")
++            print(f"Expected: /admin/auth/foo/?id=123")
++            print(f"Match: {response.url == '/admin/auth/foo/?id=123'}")
++        else:
++            print(f"Unexpected response type: {type(response)}")
++    except Http404:
++        print("Http404 raised (unexpected)")
++
++print()
++print("Test 2: URL without trailing slash and without query string")
++print("=" * 60)
++
++# Create a mock request without query string
++request2 = factory.get('/admin/auth/foo')
++request2.path = '/admin/auth/foo'
++request2.path_info = '/admin/auth/foo'
++request2.META['QUERY_STRING'] = ''
++
++with patch('django.contrib.admin.sites.resolve') as mock_resolve:
++    mock_match = Mock()
++    mock_match.func = Mock()
++    mock_match.func.should_append_slash = True
++    mock_resolve.return_value = mock_match
++    
++    try:
++        response = admin_site.catch_all_view(request2, 'auth/foo')
++        if isinstance(response, HttpResponsePermanentRedirect):
++            print(f"Redirect URL: {response.url}")
++            print(f"Expected: /admin/auth/foo/")
++            print(f"Match: {response.url == '/admin/auth/foo/'}")
++        else:
++            print(f"Unexpected response type: {type(response)}")
++    except Http404:
++        print("Http404 raised (unexpected)")
+diff --git a/update_fix.py b/update_fix.py
+new file mode 100644
+index 0000000000..357928a252
+--- /dev/null
++++ b/update_fix.py
+@@ -0,0 +1,38 @@
++#!/usr/bin/env python3
++"""
++Update the fix to include escape_leading_slashes for security
++"""
++
++# Read the file
++with open('/testbed/django/contrib/admin/sites.py', 'r') as f:
++    content = f.read()
++
++# Check if escape_leading_slashes is already imported
++if 'escape_leading_slashes' not in content:
++    # Find the imports section and add the import
++    import_section_end = content.find('from django.views.decorators.csrf import csrf_protect')
++    if import_section_end != -1:
++        # Find the end of this import line
++        line_end = content.find('\n', import_section_end)
++        # Add the new import after this line
++        new_import = '\nfrom django.utils.http import escape_leading_slashes'
++        content = content[:line_end] + new_import + content[line_end:]
++        print("Added import for escape_leading_slashes")
++    else:
++        print("Could not find import section")
++
++# Update the catch_all_view method to use escape_leading_slashes
++old_line = 'return HttpResponsePermanentRedirect(request.get_full_path(force_append_slash=True))'
++new_line = 'return HttpResponsePermanentRedirect(escape_leading_slashes(request.get_full_path(force_append_slash=True)))'
++
++if old_line in content:
++    content = content.replace(old_line, new_line)
++    print("Updated catch_all_view to use escape_leading_slashes")
++else:
++    print("Could not find the line to update")
++
++# Write the file back
++with open('/testbed/django/contrib/admin/sites.py', 'w') as f:
++    f.write(content)
++
++print("Fix updated successfully")

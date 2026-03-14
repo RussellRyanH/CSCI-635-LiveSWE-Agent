@@ -1,0 +1,116 @@
+diff --git a/django/core/serializers/python.py b/django/core/serializers/python.py
+index 36048601af..4ad563ba43 100644
+--- a/django/core/serializers/python.py
++++ b/django/core/serializers/python.py
+@@ -79,7 +79,7 @@ class Serializer(base.Serializer):
+                     return self._value_from_field(value, value._meta.pk)
+ 
+                 def queryset_iterator(obj, field):
+-                    return getattr(obj, field.name).only("pk").iterator()
++                    return getattr(obj, field.name).select_related(None).only("pk").iterator()
+ 
+             m2m_iter = getattr(obj, "_prefetched_objects_cache", {}).get(
+                 field.name,
+diff --git a/django/core/serializers/xml_serializer.py b/django/core/serializers/xml_serializer.py
+index 1d3269c41a..44458be22c 100644
+--- a/django/core/serializers/xml_serializer.py
++++ b/django/core/serializers/xml_serializer.py
+@@ -155,7 +155,7 @@ class Serializer(base.Serializer):
+                     self.xml.addQuickElement("object", attrs={"pk": str(value.pk)})
+ 
+                 def queryset_iterator(obj, field):
+-                    return getattr(obj, field.name).only("pk").iterator()
++                    return getattr(obj, field.name).select_related(None).only("pk").iterator()
+ 
+             m2m_iter = getattr(obj, "_prefetched_objects_cache", {}).get(
+                 field.name,
+diff --git a/tests/serializers/models/custom_manager.py b/tests/serializers/models/custom_manager.py
+new file mode 100644
+index 0000000000..7919e405a2
+--- /dev/null
++++ b/tests/serializers/models/custom_manager.py
+@@ -0,0 +1,35 @@
++"""
++Models for testing serialization with custom managers using select_related.
++"""
++from django.db import models
++
++
++class CustomTagMaster(models.Model):
++    name = models.CharField(max_length=120)
++
++    class Meta:
++        app_label = 'serializers'
++
++
++class CustomTagManager(models.Manager):
++    def get_queryset(self):
++        qs = super().get_queryset()
++        qs = qs.select_related("master")
++        return qs
++
++
++class CustomTag(models.Model):
++    objects = CustomTagManager()
++    name = models.CharField(max_length=120)
++    master = models.ForeignKey(CustomTagMaster, on_delete=models.SET_NULL, null=True)
++
++    class Meta:
++        app_label = 'serializers'
++
++
++class CustomTestModel(models.Model):
++    name = models.CharField(max_length=120)
++    tags = models.ManyToManyField(CustomTag, blank=True)
++
++    class Meta:
++        app_label = 'serializers'
+diff --git a/tests/serializers/test_custom_manager.py b/tests/serializers/test_custom_manager.py
+new file mode 100644
+index 0000000000..acaf9311f1
+--- /dev/null
++++ b/tests/serializers/test_custom_manager.py
+@@ -0,0 +1,43 @@
++"""
++Test for serialization of m2m relation with custom manager using select_related.
++This tests the fix for the issue where serialization fails when a related model
++has a custom manager with select_related.
++"""
++from django.core import serializers
++from django.db import models
++from django.test import TestCase
++
++from .models.custom_manager import CustomTagMaster, CustomTag, CustomTestModel
++
++
++class CustomManagerSerializationTests(TestCase):
++    """
++    Tests for serialization with custom managers using select_related.
++    """
++
++    def setUp(self):
++        self.tag_master = CustomTagMaster.objects.create(name="master")
++        self.tag = CustomTag.objects.create(name="tag", master=self.tag_master)
++        self.test_obj = CustomTestModel.objects.create(name="test")
++        self.test_obj.tags.add(self.tag)
++
++    def test_serialize_m2m_with_custom_manager_select_related(self):
++        """
++        Test that serialization works with a custom manager that uses select_related.
++        This is a regression test for the issue where serialization would fail with:
++        FieldError: Field CustomTag.master cannot be both deferred and traversed using
++        select_related at the same time.
++        """
++        # This should not raise an exception
++        result = serializers.serialize("json", [self.test_obj])
++        self.assertIsNotNone(result)
++        self.assertIn('"model": "serializers.customtestmodel"', result)
++
++    def test_serialize_m2m_with_custom_manager_select_related_python(self):
++        """
++        Test that Python serialization works with a custom manager that uses select_related.
++        """
++        result = serializers.serialize("python", [self.test_obj])
++        self.assertEqual(len(result), 1)
++        self.assertEqual(result[0]['model'], 'serializers.customtestmodel')
++        self.assertIn('tags', result[0]['fields'])
