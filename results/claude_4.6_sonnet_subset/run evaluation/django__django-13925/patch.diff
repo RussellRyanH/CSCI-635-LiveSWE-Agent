@@ -1,0 +1,134 @@
+diff --git a/django/db/models/base.py b/django/db/models/base.py
+index 4038859cfa..00cc9065be 100644
+--- a/django/db/models/base.py
++++ b/django/db/models/base.py
+@@ -1299,6 +1299,7 @@ class Model(metaclass=ModelBase):
+     def _check_default_pk(cls):
+         if (
+             cls._meta.pk.auto_created and
++            not cls._meta.pk.remote_field and
+             not settings.is_overridden('DEFAULT_AUTO_FIELD') and
+             not cls._meta.app_config._is_default_auto_field_overridden
+         ):
+diff --git a/fix_tool.py b/fix_tool.py
+new file mode 100644
+index 0000000000..9864bdc139
+--- /dev/null
++++ b/fix_tool.py
+@@ -0,0 +1,39 @@
++#!/usr/bin/env python3
++"""Tool to apply a targeted fix to a file."""
++import sys
++
++def replace_in_file(filepath, old_text, new_text):
++    with open(filepath, 'r') as f:
++        content = f.read()
++    
++    if old_text not in content:
++        print(f"ERROR: Could not find the text to replace in {filepath}")
++        print(f"Looking for:\n{old_text}")
++        sys.exit(1)
++    
++    new_content = content.replace(old_text, new_text, 1)
++    
++    with open(filepath, 'w') as f:
++        f.write(new_content)
++    
++    print(f"Successfully applied fix to {filepath}")
++
++# Fix the _check_default_pk method to not raise W042 for inherited parent link PKs
++old_text = '''    @classmethod
++    def _check_default_pk(cls):
++        if (
++            cls._meta.pk.auto_created and
++            not settings.is_overridden('DEFAULT_AUTO_FIELD') and
++            not cls._meta.app_config._is_default_auto_field_overridden
++        ):'''
++
++new_text = '''    @classmethod
++    def _check_default_pk(cls):
++        if (
++            cls._meta.pk.auto_created and
++            not cls._meta.pk.remote_field and
++            not settings.is_overridden('DEFAULT_AUTO_FIELD') and
++            not cls._meta.app_config._is_default_auto_field_overridden
++        ):'''
++
++replace_in_file('/testbed/django/db/models/base.py', old_text, new_text)
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..600cea3dae
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,71 @@
++import os
++import sys
++import django
++
++# Create a simple settings module
++import types
++settings_module = types.ModuleType('test_settings')
++settings_module.INSTALLED_APPS = [
++    'django.contrib.contenttypes', 
++    'django.contrib.auth',
++    'check_framework',
++]
++settings_module.DATABASES = {'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}}
++settings_module.DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
++sys.modules['test_settings'] = settings_module
++
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++sys.path.insert(0, '/testbed/tests')
++django.setup()
++
++from django.db import models
++from django.test.utils import isolate_apps
++from django.db.models import BigAutoField
++from django.core import checks
++
++# Test 1: model with explicit pk from abstract parent
++@isolate_apps('check_framework')
++def test_inherited_pk():
++    class AbstractParent(models.Model):
++        id = BigAutoField(primary_key=True)
++        
++        class Meta:
++            abstract = True
++
++    class ChildModel(AbstractParent):
++        pass
++
++    print("ChildModel pk:", ChildModel._meta.pk)
++    print("ChildModel pk.auto_created:", ChildModel._meta.pk.auto_created)
++    
++    # Run the check
++    errors = ChildModel.check()
++    print("Errors from check:", errors)
++    
++    return errors
++
++errors = test_inherited_pk()
++print("W042 errors:", [e for e in errors if e.id == 'models.W042'])
++
++# Test 2: model with auto pk (no pk defined in abstract parent)
++@isolate_apps('check_framework')
++def test_auto_pk():
++    class AbstractParent2(models.Model):
++        class Meta:
++            abstract = True
++
++    class ChildModel2(AbstractParent2):
++        pass
++
++    print("\nChildModel2 pk:", ChildModel2._meta.pk)
++    print("ChildModel2 pk.auto_created:", ChildModel2._meta.pk.auto_created)
++    
++    # Run the check
++    errors = ChildModel2.check()
++    print("Errors from check:", errors)
++    
++    return errors
++
++errors2 = test_auto_pk()
++print("W042 errors:", [e for e in errors2 if e.id == 'models.W042'])

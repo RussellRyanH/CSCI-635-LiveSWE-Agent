@@ -1,0 +1,147 @@
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index 4648daf395..50c1c34d2b 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -1077,10 +1077,15 @@ class Query(BaseExpression):
+         elif isinstance(value, (list, tuple)):
+             # The items of the iterable may be expressions and therefore need
+             # to be resolved independently.
+-            return type(value)(
++            values = [
+                 self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
+                 for sub_value in value
+-            )
++            ]
++            # Named tuples require unpacking since they don't accept an iterable
++            # argument like regular tuples or lists.
++            if hasattr(type(value), '_fields'):
++                return type(value)(*values)
++            return type(value)(values)
+         return value
+ 
+     def solve_lookup_type(self, lookup):
+diff --git a/test_named_tuple_fix.py b/test_named_tuple_fix.py
+new file mode 100644
+index 0000000000..dd4b420b0a
+--- /dev/null
++++ b/test_named_tuple_fix.py
+@@ -0,0 +1,56 @@
++"""Test that named tuples work as arguments to __range filters."""
++import os
++import sys
++import django
++from collections import namedtuple
++
++# Setup Django
++os.environ['DJANGO_SETTINGS_MODULE'] = 'tests.test_sqlite'
++sys.path.insert(0, '/testbed')
++
++# Configure settings manually
++from django.conf import settings
++if not settings.configured:
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++    )
++
++django.setup()
++
++from django.db.models.sql.query import Query
++from django.db.models import Model
++
++# Test the fix directly
++Range = namedtuple('Range', ['near', 'far'])
++r = Range(near=1, far=10)
++
++print(f"Named tuple: {r}")
++print(f"Type: {type(r)}")
++
++# Simulate what resolve_lookup_value does
++def simulate_resolve(value):
++    if isinstance(value, (list, tuple)):
++        return type(value)(
++            *(
++                sub_value  # In reality this would call resolve_lookup_value recursively
++                for sub_value in value
++            )
++        )
++    return value
++
++result = simulate_resolve(r)
++print(f"Result: {result}")
++print(f"Result type: {type(result)}")
++assert isinstance(result, Range), "Result should be a Range namedtuple"
++assert result.near == 1, "near should be 1"
++assert result.far == 10, "far should be 10"
++print("\nAll tests passed!")
+diff --git a/test_named_tuple_integration.py b/test_named_tuple_integration.py
+new file mode 100644
+index 0000000000..110e974bfa
+--- /dev/null
++++ b/test_named_tuple_integration.py
+@@ -0,0 +1,57 @@
++"""Integration test for named tuple fix with Django ORM."""
++import os
++import sys
++import django
++from collections import namedtuple
++
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'tests.test_sqlite')
++sys.path.insert(0, '/testbed')
++
++from django.conf import settings
++if not settings.configured:
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        DEFAULT_AUTO_FIELD='django.db.models.AutoField',
++    )
++
++django.setup()
++
++from django.db import connection
++from django.contrib.auth.models import User
++
++# Create the tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(User)
++
++# Create some users
++User.objects.create_user('user1', 'user1@example.com', 'pass', id=1)
++User.objects.create_user('user2', 'user2@example.com', 'pass', id=2)
++User.objects.create_user('user3', 'user3@example.com', 'pass', id=3)
++
++print("Testing regular tuple with __range...")
++result = list(User.objects.filter(id__range=(1, 3)))
++print(f"Regular tuple result count: {len(result)} (expected 3)")
++assert len(result) == 3, f"Expected 3, got {len(result)}"
++
++print("Testing list with __range...")
++result = list(User.objects.filter(id__range=[1, 2]))
++print(f"List result count: {len(result)} (expected 2)")
++assert len(result) == 2, f"Expected 2, got {len(result)}"
++
++print("Testing named tuple with __range...")
++Range = namedtuple('Range', ['near', 'far'])
++r = Range(near=1, far=2)
++result = list(User.objects.filter(id__range=r))
++print(f"Named tuple result count: {len(result)} (expected 2)")
++assert len(result) == 2, f"Expected 2, got {len(result)}"
++
++print("\nAll integration tests passed!")
