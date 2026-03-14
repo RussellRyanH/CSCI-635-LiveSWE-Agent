@@ -1,0 +1,110 @@
+diff --git a/django/db/models/expressions.py b/django/db/models/expressions.py
+index 5e3c7cab82..cbf4fd8296 100644
+--- a/django/db/models/expressions.py
++++ b/django/db/models/expressions.py
+@@ -533,6 +533,7 @@ _connector_combinations = [
+             Combinable.SUB,
+             Combinable.MUL,
+             Combinable.DIV,
++            Combinable.MOD,
+         )
+     },
+     # Bitwise operators.
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..5f6364c885
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,46 @@
++import os
++import django
++from django.conf import settings
++
++if not settings.configured:
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++    )
++    django.setup()
++
++from django.db.models import DecimalField, IntegerField, Value
++from django.db.models.expressions import CombinedExpression, Combinable
++
++# Test MOD with different types (Decimal % Integer)
++lhs = Value(10.5, output_field=DecimalField())
++rhs = Value(3, output_field=IntegerField())
++
++try:
++    expr = lhs % rhs
++    output = expr.output_field
++    print(f"Success: output_field = {output.__class__.__name__}")
++    print(f"Expected: DecimalField, Got: {output.__class__.__name__}")
++    if isinstance(output, DecimalField):
++        print("PASS: Output field is correctly resolved to DecimalField")
++    else:
++        print("FAIL: Output field is not resolved to DecimalField")
++except Exception as e:
++    print(f"Error: {e}")
++    print("FAIL: Could not resolve output_field for MOD with Decimal and Integer")
++
++# Compare with ADD which should work
++try:
++    expr2 = lhs + rhs
++    output2 = expr2.output_field
++    print(f"\nADD Success: output_field = {output2.__class__.__name__}")
++except Exception as e:
++    print(f"\nADD Error: {e}")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..41a5ddce4e
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,40 @@
++import os
++import django
++from django.conf import settings
++
++if not settings.configured:
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++    )
++    django.setup()
++
++from django.db.models import DecimalField, IntegerField, FloatField, Value
++
++def test_mod(lhs_val, lhs_field, rhs_val, rhs_field, expected_type):
++    lhs = Value(lhs_val, output_field=lhs_field())
++    rhs = Value(rhs_val, output_field=rhs_field())
++    try:
++        expr = lhs % rhs
++        output = expr.output_field
++        result = "PASS" if isinstance(output, expected_type) else "FAIL"
++        print(f"{result}: {lhs_field.__name__} % {rhs_field.__name__} -> {output.__class__.__name__} (expected: {expected_type.__name__})")
++    except Exception as e:
++        print(f"FAIL: {lhs_field.__name__} % {rhs_field.__name__} -> Error: {e}")
++
++# Test cases
++test_mod(10.5, DecimalField, 3, IntegerField, DecimalField)   # Decimal % Integer = Decimal
++test_mod(10, IntegerField, 3.5, DecimalField, DecimalField)   # Integer % Decimal = Decimal
++test_mod(10.5, FloatField, 3, IntegerField, FloatField)       # Float % Integer = Float
++test_mod(10, IntegerField, 3.5, FloatField, FloatField)       # Integer % Float = Float
++test_mod(10, IntegerField, 3, IntegerField, IntegerField)     # Integer % Integer = Integer
++test_mod(10.5, FloatField, 3.5, FloatField, FloatField)       # Float % Float = Float
++test_mod(10.5, DecimalField, 3.5, DecimalField, DecimalField) # Decimal % Decimal = Decimal
