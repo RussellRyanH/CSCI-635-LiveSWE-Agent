@@ -1,0 +1,205 @@
+diff --git a/django/db/models/base.py b/django/db/models/base.py
+index 4038859cfa..79225d8d0e 100644
+--- a/django/db/models/base.py
++++ b/django/db/models/base.py
+@@ -1299,6 +1299,7 @@ class Model(metaclass=ModelBase):
+     def _check_default_pk(cls):
+         if (
+             cls._meta.pk.auto_created and
++            not cls._meta.pk.is_relation and
+             not settings.is_overridden('DEFAULT_AUTO_FIELD') and
+             not cls._meta.app_config._is_default_auto_field_overridden
+         ):
+diff --git a/repro.py b/repro.py
+new file mode 100644
+index 0000000000..6e8ed1f812
+--- /dev/null
++++ b/repro.py
+@@ -0,0 +1,41 @@
++import django
++from django.conf import settings
++from django.core.checks import run_checks
++from django.apps import AppConfig
++
++class TestAppConfig(AppConfig):
++    name = 'test_app'
++
++settings.configure(
++    INSTALLED_APPS=['test_app'],
++    DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}},
++)
++
++# Create a mock test_app module
++import sys
++import types
++test_app = types.ModuleType('test_app')
++test_app.apps = types.ModuleType('test_app.apps')
++test_app.apps.TestAppConfig = TestAppConfig
++sys.modules['test_app'] = test_app
++sys.modules['test_app.apps'] = test_app.apps
++
++django.setup()
++
++from django.db import models
++
++class Entity(models.Model):
++    id = models.BigAutoField(primary_key=True)
++
++    class Meta:
++        app_label = 'test_app'
++
++class User(Entity):
++    class Meta:
++        app_label = 'test_app'
++
++errors = run_checks()
++for error in errors:
++    if error.id == 'models.W042':
++        print(f"Found W042: {error.obj} - {error.msg}")
++
+diff --git a/repro2.py b/repro2.py
+new file mode 100644
+index 0000000000..66077876fd
+--- /dev/null
++++ b/repro2.py
+@@ -0,0 +1,43 @@
++import os
++import django
++from django.conf import settings
++from django.core.checks import run_checks
++
++BASE_DIR = os.path.dirname(os.path.abspath(__file__))
++
++settings.configure(
++    INSTALLED_APPS=['reproapp'],
++    DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}},
++)
++
++os.makedirs(os.path.join(BASE_DIR, 'reproapp'), exist_ok=True)
++with open(os.path.join(BASE_DIR, 'reproapp', '__init__.py'), 'w') as f:
++    pass
++with open(os.path.join(BASE_DIR, 'reproapp', 'models.py'), 'w') as f:
++    f.write('''
++from django.db import models
++
++class Entity(models.Model):
++    id = models.BigAutoField(primary_key=True)
++
++class User(Entity):
++    name = models.CharField(max_length=100)
++''')
++with open(os.path.join(BASE_DIR, 'reproapp', 'apps.py'), 'w') as f:
++    f.write('''
++from django.apps import AppConfig
++class ReproAppConfig(AppConfig):
++    name = 'reproapp'
++''')
++
++django.setup()
++from reproapp.models import Entity, User
++
++print("Entity PK auto_created:", Entity._meta.pk.auto_created)
++print("User PK auto_created:", User._meta.pk.auto_created)
++print("User PK type:", type(User._meta.pk))
++
++errors = run_checks()
++for error in errors:
++    if error.id == 'models.W042':
++        print(f"Found W042: {error.obj} - {error.msg}")
+diff --git a/reproapp/__init__.py b/reproapp/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/reproapp/apps.py b/reproapp/apps.py
+new file mode 100644
+index 0000000000..99eb414165
+--- /dev/null
++++ b/reproapp/apps.py
+@@ -0,0 +1,4 @@
++
++from django.apps import AppConfig
++class ReproAppConfig(AppConfig):
++    name = 'reproapp'
+diff --git a/reproapp/models.py b/reproapp/models.py
+new file mode 100644
+index 0000000000..fe440eb0df
+--- /dev/null
++++ b/reproapp/models.py
+@@ -0,0 +1,8 @@
++
++from django.db import models
++
++class Entity(models.Model):
++    id = models.BigAutoField(primary_key=True)
++
++class User(Entity):
++    name = models.CharField(max_length=100)
+diff --git a/reproduce.py b/reproduce.py
+new file mode 100644
+index 0000000000..7c51a82585
+--- /dev/null
++++ b/reproduce.py
+@@ -0,0 +1,26 @@
++import django
++from django.conf import settings
++from django.core.management import call_command
++from django.core.checks import run_checks
++
++settings.configure(
++    INSTALLED_APPS=[
++        '__main__',
++    ],
++    DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}},
++    DEFAULT_AUTO_FIELD='django.db.models.AutoField',
++)
++django.setup()
++
++from django.db import models
++
++class Entity(models.Model):
++    id = models.CharField(max_length=100, primary_key=True)
++
++class User(Entity):
++    name = models.CharField(max_length=100)
++
++errors = run_checks()
++for error in errors:
++    print(error)
++
+diff --git a/test_app.py b/test_app.py
+new file mode 100644
+index 0000000000..df76cee678
+--- /dev/null
++++ b/test_app.py
+@@ -0,0 +1,32 @@
++import django
++import uuid
++from django.conf import settings
++from django.core.checks import run_checks
++from django.apps import AppConfig
++
++class TestAppConfig(AppConfig):
++    name = 'test_app'
++
++settings.configure(
++    INSTALLED_APPS=['test_app'],
++    DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}},
++)
++django.setup()
++
++from django.db import models
++
++class Entity(models.Model):
++    my_pk = models.AutoField(primary_key=True)
++
++    class Meta:
++        app_label = 'test_app'
++
++class User(Entity):
++    class Meta:
++        app_label = 'test_app'
++
++errors = run_checks()
++for error in errors:
++    if error.id == 'models.W042':
++        print(f"Found W042: {error.obj} - {error.msg}")
++

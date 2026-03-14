@@ -1,0 +1,150 @@
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index 4648daf395..a45e48e2a6 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -1077,10 +1077,13 @@ class Query(BaseExpression):
+         elif isinstance(value, (list, tuple)):
+             # The items of the iterable may be expressions and therefore need
+             # to be resolved independently.
+-            return type(value)(
++            resolved_values = (
+                 self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
+                 for sub_value in value
+             )
++            if hasattr(value, '_make'):
++                return type(value)(*resolved_values)
++            return type(value)(resolved_values)
+         return value
+ 
+     def solve_lookup_type(self, lookup):
+diff --git a/fix_query.py b/fix_query.py
+new file mode 100644
+index 0000000000..278c1a0961
+--- /dev/null
++++ b/fix_query.py
+@@ -0,0 +1,37 @@
++with open("django/db/models/sql/query.py", "r") as f:
++    lines = f.readlines()
++
++for i, line in enumerate(lines):
++    if "def resolve_lookup_value(self, value, can_reuse, allow_joins):" in line:
++        start_idx = i
++        break
++
++# Find end of method
++for i in range(start_idx + 1, len(lines)):
++    if lines[i].startswith("    def solve_lookup_type"):
++        end_idx = i
++        break
++
++new_method = """    def resolve_lookup_value(self, value, can_reuse, allow_joins):
++        if hasattr(value, 'resolve_expression'):
++            value = value.resolve_expression(
++                self, reuse=can_reuse, allow_joins=allow_joins,
++            )
++        elif isinstance(value, (list, tuple)):
++            # The items of the iterable may be expressions and therefore need
++            # to be resolved independently.
++            resolved_values = (
++                self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
++                for sub_value in value
++            )
++            if hasattr(value, '_make'):
++                return type(value)(*resolved_values)
++            return type(value)(resolved_values)
++        return value
++
++"""
++
++lines = lines[:start_idx] + [new_method] + lines[end_idx:]
++
++with open("django/db/models/sql/query.py", "w") as f:
++    f.writelines(lines)
+diff --git a/reproduce.py b/reproduce.py
+new file mode 100644
+index 0000000000..b6764e33e8
+--- /dev/null
++++ b/reproduce.py
+@@ -0,0 +1,29 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from collections import namedtuple
++
++# Configure Django settings
++settings.configure(
++    DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}},
++    INSTALLED_APPS=['__main__'],
++)
++
++django.setup()
++
++class MyModel(models.Model):
++    val = models.IntegerField()
++
++MyRange = namedtuple('MyRange', ['near', 'far'])
++
++# Create schema
++django.core.management.call_command('migrate', verbosity=0, interactive=False)
++
++# Try range lookup with namedtuple
++try:
++    qs = MyModel.objects.filter(val__range=MyRange(1, 10))
++    print(qs.query)
++    print("SUCCESS")
++except Exception as e:
++    print(f"ERROR: {type(e).__name__}: {e}")
+diff --git a/test_namedtuple_check.py b/test_namedtuple_check.py
+new file mode 100644
+index 0000000000..40bc5a08ff
+--- /dev/null
++++ b/test_namedtuple_check.py
+@@ -0,0 +1,12 @@
++from collections import namedtuple
++
++Point = namedtuple('Point', ['x', 'y'])
++
++def check(value):
++    is_namedtuple = hasattr(value, '_make') and hasattr(value, '_fields')
++    is_namedtuple_type = hasattr(type(value), '_make')
++    print(f"type: {type(value).__name__}, is_namedtuple: {is_namedtuple}")
++
++check([1, 2])
++check((1, 2))
++check(Point(1, 2))
+diff --git a/test_reconstruct.py b/test_reconstruct.py
+new file mode 100644
+index 0000000000..05761d3130
+--- /dev/null
++++ b/test_reconstruct.py
+@@ -0,0 +1,29 @@
++from collections import namedtuple
++
++Point = namedtuple('Point', ['x', 'y'])
++
++def reconstruct(value):
++    iterator = (v + 1 for v in value)
++    
++    # Try different strategies based on the issue description
++    if type(value) is list:
++        return list(iterator)
++    elif type(value) is tuple:
++        return tuple(iterator)
++    elif hasattr(value, '_make'): # namedtuple
++        return value._make(iterator)
++    else:
++        # What if we just check if it's namedtuple?
++        pass
++
++p = Point(1, 2)
++l = [1, 2]
++t = (1, 2)
++
++print("NamedTuple:", p._make(v + 1 for v in p))
++print("NamedTuple unpacked:", type(p)(*(v + 1 for v in p)))
++try:
++    print("Tuple unpacked:", tuple(*(v + 1 for v in t)))
++except Exception as e:
++    print("Tuple unpacked error:", e)
++
