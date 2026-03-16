@@ -1,0 +1,309 @@
+diff --git a/fix_perm.py b/fix_perm.py
+new file mode 100644
+index 000000000..448fb2f1c
+--- /dev/null
++++ b/fix_perm.py
+@@ -0,0 +1,90 @@
++#!/usr/bin/env python3
++import re
++from pathlib import Path
++p = Path('sympy/combinatorics/permutations.py')
++s = p.read_text()
++lines = s.splitlines()
++# find class start
++start = None
++for idx,l in enumerate(lines):
++    if l.lstrip().startswith('class Permutation('):
++        start = idx
++        break
++if start is None:
++    raise SystemExit('Permutation class not found')
++# find alias line 'Perm = Permutation' to mark end
++end = None
++for idx in range(start+1, len(lines)):
++    if lines[idx].strip().startswith('Perm = Permutation'):
++        end = idx
++        break
++if end is None:
++    end = len(lines)
++# process class block
++class_block = lines[start+1:end]
++out_block = []
++i = 0
++while i < len(class_block):
++    line = class_block[i]
++    # collect decorators
++    decs = []
++    j = i
++    while j < len(class_block) and class_block[j].lstrip().startswith('@'):
++        decs.append(class_block[j].strip())
++        j += 1
++    if j < len(class_block) and class_block[j].lstrip().startswith('def '):
++        def_line = class_block[j]
++        indent = re.match(r"^(\s*)", def_line).group(1)
++        # extract params
++        m = re.match(r"\s*def\s+\w+\s*\(([^)]*)\)", def_line)
++        params = m.group(1).strip() if m else ''
++        firstparam = None
++        if params:
++            # get first param name if not varargs-only
++            first = params.split(',')[0].strip()
++            if first and not first.startswith('*'):
++                firstparam = first
++        # if staticmethod and no first param, convert to classmethod
++        is_static = any(d == '@staticmethod' for d in decs)
++        if is_static and firstparam is None:
++            # change decorator
++            new_decs = [('@classmethod' if d == '@staticmethod' else d) for d in decs]
++            decs = new_decs
++            # add cls as first param
++            def_line = def_line.replace('def ', 'def ')
++            def_line = def_line.replace('(', '(cls, ', 1)
++            firstparam = 'cls'
++            class_block[j] = def_line
++        # if decorator contains @classmethod but firstparam is empty, set firstparam to 'self' (shouldn't happen)
++        if not firstparam:
++            # fallback: use 'self' if available else 'cls'
++            if any(d == '@classmethod' for d in decs):
++                firstparam = 'self'
++            else:
++                firstparam = 'self'
++        # write decorators and def line
++        for d in decs:
++            out_block.append(indent + d)
++        out_block.append(class_block[j])
++        # now process method body until next top-level def or decorator or end
++        k = j+1
++        while k < len(class_block):
++            # check if next member starts (def or decorator) at same indent
++            if class_block[k].lstrip().startswith('@') or class_block[k].lstrip().startswith('def '):
++                break
++            # replace occurrences of _af_new(
++            out_block.append(class_block[k].replace('_af_new(', f'{firstparam}._af_new('))
++            k += 1
++        i = k
++    else:
++        out_block.append(line)
++        i = j if j>i else i+1
++# now replace the original class block
++new_lines = lines[:start+1] + out_block + lines[end:]
++new_s = '\n'.join(new_lines)
++# make _af_new a classmethod: replace "@staticmethod\n    def _af_new(perm):" with "@classmethod\n    def _af_new(cls, perm):" and Basic.__new__(Perm, perm) -> Basic.__new__(cls, perm)
++new_s = new_s.replace('@staticmethod\n    def _af_new(perm):', '@classmethod\n    def _af_new(cls, perm):')
++new_s = new_s.replace('p = Basic.__new__(Perm, perm)', 'p = Basic.__new__(cls, perm)')
++# write back
++p.write_text(new_s)
++print('patched', p)
+diff --git a/sympy/combinatorics/permutations.py b/sympy/combinatorics/permutations.py
+index 4ac1c2ef3..94e506b64 100644
+--- a/sympy/combinatorics/permutations.py
++++ b/sympy/combinatorics/permutations.py
+@@ -857,9 +857,9 @@ def __new__(cls, *args, **kwargs):
+         #g) (Permutation) = adjust size or return copy
+         ok = True
+         if not args:  # a
+-            return _af_new(list(range(size or 0)))
++            return cls._af_new(list(range(size or 0)))
+         elif len(args) > 1:  # c
+-            return _af_new(Cycle(*args).list(size))
++            return cls._af_new(Cycle(*args).list(size))
+         if len(args) == 1:
+             a = args[0]
+             if isinstance(a, Perm):  # g
+@@ -867,9 +867,9 @@ def __new__(cls, *args, **kwargs):
+                     return a
+                 return Perm(a.array_form, size=size)
+             if isinstance(a, Cycle):  # f
+-                return _af_new(a.list(size))
++                return cls._af_new(a.list(size))
+             if not is_sequence(a):  # b
+-                return _af_new(list(range(a + 1)))
++                return cls._af_new(list(range(a + 1)))
+             if has_variety(is_sequence(ai) for ai in a):
+                 ok = False
+         else:
+@@ -924,13 +924,13 @@ def __new__(cls, *args, **kwargs):
+         obj._size = size
+         return obj
+ 
+-    @staticmethod
+-    def _af_new(perm):
++    @classmethod
++    def _af_new(cls, perm):
+         """A method to produce a Permutation object from a list;
+         the list is bound to the _array_form attribute, so it must
+         not be modified; this method is meant for internal use only;
+         the list ``a`` is supposed to be generated as a temporary value
+-        in a method, so p = Perm._af_new(a) is the only object
++        in a method, so p = Perm.perm._af_new(a) is the only object
+         to hold a reference to ``a``::
+ 
+         Examples
+@@ -939,12 +939,12 @@ def _af_new(perm):
+         >>> from sympy.combinatorics.permutations import Perm
+         >>> Perm.print_cyclic = False
+         >>> a = [2,1,3,0]
+-        >>> p = Perm._af_new(a)
++        >>> p = Perm.perm._af_new(a)
+         >>> p
+         Permutation([2, 1, 3, 0])
+ 
+         """
+-        p = Basic.__new__(Perm, perm)
++        p = Basic.__new__(cls, perm)
+         p._array_form = perm
+         p._size = len(perm)
+         return p
+@@ -1173,8 +1173,8 @@ def __sub__(self, other):
+         """
+         return self.__add__(-other)
+ 
+-    @staticmethod
+-    def rmul(*args):
++    @classmethod
++    def rmul(cls, *args):
+         """
+         Return product of Permutations [a, b, c, ...] as the Permutation whose
+         ith value is a(b(c(i))).
+@@ -1219,14 +1219,14 @@ def rmul(*args):
+             rv = args[i]*rv
+         return rv
+ 
+-    @staticmethod
+-    def rmul_with_af(*args):
++    @classmethod
++    def rmul_with_af(cls, *args):
+         """
+         same as rmul, but the elements of args are Permutation objects
+         which have _array_form
+         """
+         a = [x._array_form for x in args]
+-        rv = _af_new(_af_rmuln(*a))
++        rv = cls._af_new(_af_rmuln(*a))
+         return rv
+ 
+     def mul_inv(self, other):
+@@ -1235,7 +1235,7 @@ def mul_inv(self, other):
+         """
+         a = _af_invert(self._array_form)
+         b = other._array_form
+-        return _af_new(_af_rmul(a, b))
++        return self._af_new(_af_rmul(a, b))
+ 
+     def __rmul__(self, other):
+         """This is needed to coerse other to Permutation in rmul."""
+@@ -1300,7 +1300,7 @@ def __mul__(self, other):
+         else:
+             b.extend(list(range(len(b), len(a))))
+             perm = [b[i] for i in a] + b[len(a):]
+-        return _af_new(perm)
++        return self._af_new(perm)
+ 
+     def commutes_with(self, other):
+         """
+@@ -1341,7 +1341,7 @@ def __pow__(self, n):
+             raise NotImplementedError(
+                 'p**p is not defined; do you mean p^p (conjugate)?')
+         n = int(n)
+-        return _af_new(_af_pow(self.array_form, n))
++        return self._af_new(_af_pow(self.array_form, n))
+ 
+     def __rxor__(self, i):
+         """Return self(i) when ``i`` is an int.
+@@ -1436,7 +1436,7 @@ def __xor__(self, h):
+         p = self._array_form
+         for i in range(self.size):
+             a[h[i]] = h[p[i]]
+-        return _af_new(a)
++        return self._af_new(a)
+ 
+     def transpositions(self):
+         """
+@@ -1519,7 +1519,7 @@ def __invert__(self):
+         >>> p*~p == ~p*p == Permutation([0, 1, 2, 3])
+         True
+         """
+-        return _af_new(_af_invert(self._array_form))
++        return self._af_new(_af_invert(self._array_form))
+ 
+     def __iter__(self):
+         """Yield elements from array form.
+@@ -1629,7 +1629,7 @@ def next_lex(self):
+                 perm[j], perm[i] = perm[i], perm[j]
+                 i += 1
+                 j -= 1
+-        return _af_new(perm)
++        return self._af_new(perm)
+ 
+     @classmethod
+     def unrank_nonlex(self, n, r):
+@@ -1661,7 +1661,7 @@ def _unrank1(n, r, a):
+         n = int(n)
+         r = r % ifac(n)
+         _unrank1(n, r, id_perm)
+-        return _af_new(id_perm)
++        return n._af_new(id_perm)
+ 
+     def rank_nonlex(self, inv_perm=None):
+         """
+@@ -2125,7 +2125,7 @@ def commutator(self, x):
+         invb = [None]*n
+         for i in range(n):
+             invb[b[i]] = i
+-        return _af_new([a[b[inva[i]]] for i in invb])
++        return self._af_new([a[b[inva[i]]] for i in invb])
+ 
+     def signature(self):
+         """
+@@ -2423,7 +2423,7 @@ def unrank_trotterjohnson(self, size, rank):
+                     perm[i] = perm[i - 1]
+                 perm[k] = j - 1
+             r2 = r1
+-        return _af_new(perm)
++        return self._af_new(perm)
+ 
+     def next_trotterjohnson(self):
+         """
+@@ -2477,7 +2477,7 @@ def next_trotterjohnson(self):
+                     done = True
+         if m == 0:
+             return None
+-        return _af_new(pi)
++        return self._af_new(pi)
+ 
+     def get_precedence_matrix(self):
+         """
+@@ -2734,7 +2734,7 @@ def from_inversion_vector(self, inversion):
+         except IndexError:
+             raise ValueError("The inversion vector is not valid.")
+         perm.extend(N)
+-        return _af_new(perm)
++        return self._af_new(perm)
+ 
+     @classmethod
+     def random(self, n):
+@@ -2753,7 +2753,7 @@ def random(self, n):
+         """
+         perm_array = list(range(n))
+         random.shuffle(perm_array)
+-        return _af_new(perm_array)
++        return self._af_new(perm_array)
+ 
+     @classmethod
+     def unrank_lex(self, size, rank):
+@@ -2787,7 +2787,7 @@ def unrank_lex(self, size, rank):
+                 if perm_array[j] > d - 1:
+                     perm_array[j] += 1
+             psize = new_psize
+-        return _af_new(perm_array)
++        return self._af_new(perm_array)
+ 
+     # global flag to control how permutations are printed
+     # when True, Permutation([0, 2, 1, 3]) -> Cycle(1, 2)
+@@ -2828,4 +2828,4 @@ def _merge(arr, temp, left, mid, right):
+     return inv_count
+ 
+ Perm = Permutation
+-_af_new = Perm._af_new
++_af_new = Perm._af_new
+\ No newline at end of file

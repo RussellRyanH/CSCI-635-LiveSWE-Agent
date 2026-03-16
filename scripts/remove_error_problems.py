@@ -52,7 +52,7 @@ def delete_preds_entries(file_path, keys_to_remove):
 def main ():
     # Parent directory that contains the subdirectories
     parent_directory = "../results/llm-ablation/gpt-5-mini/"
-    exit_stat_file = "exit_statuses_1773065148.528824.yaml"
+    exit_stat_file = "exit_statuses_1773615734.5967455.yaml"
     key = "RateLimitError"
 
     subdirs_to_remove = parse_yaml_list(parent_directory + exit_stat_file, key)
