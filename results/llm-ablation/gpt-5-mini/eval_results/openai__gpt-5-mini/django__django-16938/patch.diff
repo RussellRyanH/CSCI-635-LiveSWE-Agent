@@ -1,0 +1,128 @@
+diff --git a/django/core/serializers/python.py b/django/core/serializers/python.py
+index 36048601af..f96f4cd880 100644
+--- a/django/core/serializers/python.py
++++ b/django/core/serializers/python.py
+@@ -76,10 +76,18 @@ class Serializer(base.Serializer):
+             else:
+ 
+                 def m2m_value(value):
+-                    return self._value_from_field(value, value._meta.pk)
++                    # Accept either model instances (from prefetched cache) or
++                    # primary key values (from values_list iterator).
++                    if hasattr(value, "_meta"):
++                        return self._value_from_field(value, value._meta.pk)
++                    return value
+ 
+                 def queryset_iterator(obj, field):
+-                    return getattr(obj, field.name).only("pk").iterator()
++                    # Avoid combining select_related() (from a custom manager) with
++                    # only(), which can raise FieldError. Use values_list to fetch
++                    # primary keys when the M2M relation isn't prefetched.
++                    qs = getattr(obj, field.name)
++                    return qs.values_list(qs.model._meta.pk.name, flat=True).iterator()
+ 
+             m2m_iter = getattr(obj, "_prefetched_objects_cache", {}).get(
+                 field.name,
+diff --git a/django/core/serializers/xml_serializer.py b/django/core/serializers/xml_serializer.py
+index 1d3269c41a..63a6f398dd 100644
+--- a/django/core/serializers/xml_serializer.py
++++ b/django/core/serializers/xml_serializer.py
+@@ -152,10 +152,20 @@ class Serializer(base.Serializer):
+             else:
+ 
+                 def handle_m2m(value):
+-                    self.xml.addQuickElement("object", attrs={"pk": str(value.pk)})
++                    # Accept either model instances (from prefetched cache) or
++                    # primary key values (from values_list iterator).
++                    if hasattr(value, "pk"):
++                        pk = value.pk
++                    else:
++                        pk = value
++                    self.xml.addQuickElement("object", attrs={"pk": str(pk)})
+ 
+                 def queryset_iterator(obj, field):
+-                    return getattr(obj, field.name).only("pk").iterator()
++                    # Avoid combining select_related() (from a custom manager) with
++                    # only(), which can raise FieldError. Use values_list to fetch
++                    # primary keys when the M2M relation isn't prefetched.
++                    qs = getattr(obj, field.name)
++                    return qs.values_list(qs.model._meta.pk.name, flat=True).iterator()
+ 
+             m2m_iter = getattr(obj, "_prefetched_objects_cache", {}).get(
+                 field.name,
+diff --git a/tests/quick_serialize_test.py b/tests/quick_serialize_test.py
+new file mode 100644
+index 0000000000..b9fd490e37
+--- /dev/null
++++ b/tests/quick_serialize_test.py
+@@ -0,0 +1,53 @@
++import os
++import django
++from django.conf import settings
++
++settings.configure(
++    INSTALLED_APPS=['django.contrib.contenttypes','django.contrib.auth','tests.quickapp'],
++    DATABASES={'default':{'ENGINE':'django.db.backends.sqlite3','NAME':':memory:'}},
++    SECRET_KEY='x',
++)
++
++django.setup()
++from django.apps import apps
++from django.db import models, connection
++from django.core import serializers
++
++class TestTagMaster(models.Model):
++    name=models.CharField(max_length=120)
++    class Meta:
++        app_label='tests.quickapp'
++
++class TestTagManager(models.Manager):
++    def get_queryset(self):
++        return super().get_queryset().select_related('master')
++
++class TestTag(models.Model):
++    objects = TestTagManager()
++    name=models.CharField(max_length=120)
++    master=models.ForeignKey('tests.quickapp.TestTagMaster',on_delete=models.SET_NULL,null=True)
++    class Meta:
++        app_label='tests.quickapp'
++
++class Test(models.Model):
++    name=models.CharField(max_length=120)
++    tags=models.ManyToManyField('tests.quickapp.TestTag',blank=True)
++    class Meta:
++        app_label='tests.quickapp'
++
++apps.register_model('tests.quickapp','TestTagMaster',TestTagMaster)
++apps.register_model('tests.quickapp','TestTag',TestTag)
++apps.register_model('tests.quickapp','Test',Test)
++
++with connection.schema_editor() as editor:
++    editor.create_model(TestTagMaster)
++    editor.create_model(TestTag)
++    editor.create_model(Test)
++    editor.create_model(Test.tags.through)
++
++m=TestTagMaster.objects.create(name='master')
++t=TestTag.objects.create(name='tag',master=m)
++test=Test.objects.create(name='test')
++test.tags.add(t)
++
++print(serializers.serialize('json',[test]))
+diff --git a/tests/quickapp/__init__.py b/tests/quickapp/__init__.py
+new file mode 100644
+index 0000000000..e8f5d7024a
+--- /dev/null
++++ b/tests/quickapp/__init__.py
+@@ -0,0 +1 @@
++default_app_config = 'tests.quickapp.apps.QuickAppConfig'
+diff --git a/tests/quickapp/apps.py b/tests/quickapp/apps.py
+new file mode 100644
+index 0000000000..67704e1b1e
+--- /dev/null
++++ b/tests/quickapp/apps.py
+@@ -0,0 +1,4 @@
++from django.apps import AppConfig
++class QuickAppConfig(AppConfig):
++    name='tests.quickapp'
++    label='tests_quickapp'
