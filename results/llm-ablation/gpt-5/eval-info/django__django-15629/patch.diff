@@ -1,0 +1,89 @@
+diff --git a/django/db/backends/mysql/schema.py b/django/db/backends/mysql/schema.py
+index 562b209eef..4b8e10f6cd 100644
+--- a/django/db/backends/mysql/schema.py
++++ b/django/db/backends/mysql/schema.py
+@@ -167,6 +167,28 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
+ 
+     def _alter_column_type_sql(self, model, old_field, new_field, new_type):
+         new_type = self._set_field_new_type_null_status(old_field, new_type)
++        # If a collation is specified on the field being altered, include it in
++        # the ALTER statement. This is required when a referenced primary key
++        # uses a specific collation and the referencing foreign key column must
++        # match it.
++        try:
++            new_db_params = new_field.db_parameters(connection=self.connection)
++        except Exception:  # Defensive, e.g., unresolved related field.
++            new_db_params = {}
++        collation = new_db_params.get("collation")
++        if collation:
++            return (
++                (
++                    self.sql_alter_column_collate
++                    % {
++                        "column": self.quote_name(new_field.column),
++                        "type": new_type,
++                        "collation": " " + self._collate_sql(collation),
++                    },
++                    [],
++                ),
++                [],
++            )
+         return super()._alter_column_type_sql(model, old_field, new_field, new_type)
+ 
+     def _rename_field_sql(self, table, old_field, new_field, new_type):
+diff --git a/django/db/models/fields/related.py b/django/db/models/fields/related.py
+index fad5560486..3b3e668871 100644
+--- a/django/db/models/fields/related.py
++++ b/django/db/models/fields/related.py
+@@ -1180,7 +1180,50 @@ class ForeignKey(ForeignObject):
+         return self.target_field.rel_db_type(connection=connection)
+ 
+     def db_parameters(self, connection):
+-        return {"type": self.db_type(connection), "check": self.db_check(connection)}
++
++        """
++
++        Return database parameters for the foreign key column.
++
++
++        Ensure that column-level attributes which must match between a
++
++        referenced primary key and referencing foreign key (e.g. MySQL/MariaDB
++
++        collations for character-based keys) are propagated from the target
++
++        field. This prevents "ADD CONSTRAINT" failures when the referenced
++
++        column uses a non-default collation (via db_collation) and the
++
++        referencing column would otherwise inherit a different/default
++
++        collation when altered.
++
++        """
++
++        params = {"type": self.db_type(connection), "check": self.db_check(connection)}
++
++        # Propagate collation from the target field when available.
++
++        try:
++
++            target_params = self.target_field.db_parameters(connection=connection)
++
++        except Exception:
++
++            target_params = None
++
++        if isinstance(target_params, dict):
++
++            collation = target_params.get("collation")
++
++            if collation:
++
++                params["collation"] = collation
++
++        return params
++
+ 
+     def convert_empty_strings(self, value, expression, connection):
+         if (not value) and isinstance(value, str):
