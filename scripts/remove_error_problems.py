@@ -1,8 +1,9 @@
 '''In the event that certain problems error out during execution, 
-this script removes trajectories and json entry from the resutls folder.
-In particular, I have set up to remove rate limit errors runs, so I can rerun the failed ones.'''
+this script removes trajectories and json entry from the results folder.
+The default error key is RateLimitError, but a third argument can be provided with any valid error key.'''
 
 import os
+import sys
 import shutil
 import yaml
 import json
@@ -51,9 +52,18 @@ def delete_preds_entries(file_path, keys_to_remove):
 
 def main ():
     # Parent directory that contains the subdirectories
-    parent_directory = "../results/llm-ablation/gpt-5-mini/"
-    exit_stat_file = "exit_statuses_1773615734.5967455.yaml"
+    parent_directory = ""
+    exit_stat_file = ""
     key = "RateLimitError"
+
+    if len(sys.argv) >= 3:
+        parent_directory = sys.argv[1]
+        exit_stat_file = sys.argv[2]
+
+        if len(sys.argv) > 3:
+            key = sys.argv[3]
+    else:
+        print("Wrong number of arguments provided.\nExample Usage: python remove_error_problems.py <results_directory> <exit_status.yaml> <OPTIONAL: error_key_to_remove>")
 
     subdirs_to_remove = parse_yaml_list(parent_directory + exit_stat_file, key)
     remove_subdirs(parent_directory, subdirs_to_remove)
