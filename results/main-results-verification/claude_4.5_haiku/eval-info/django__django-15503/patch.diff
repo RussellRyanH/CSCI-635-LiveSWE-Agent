@@ -1,0 +1,1113 @@
+diff --git a/django/db/models/fields/json.py b/django/db/models/fields/json.py
+index fdca700c9d..33573847dd 100644
+--- a/django/db/models/fields/json.py
++++ b/django/db/models/fields/json.py
+@@ -126,16 +126,21 @@ class JSONField(CheckFieldDefaultMixin, Field):
+         )
+ 
+ 
+-def compile_json_path(key_transforms, include_root=True):
++def compile_json_path(key_transforms, include_root=True, treat_numeric_as_int=True):
+     path = ["$"] if include_root else []
+     for key_transform in key_transforms:
+-        try:
+-            num = int(key_transform)
+-        except ValueError:  # non-integer
++        if treat_numeric_as_int:
++            try:
++                num = int(key_transform)
++            except ValueError:  # non-integer
++                path.append(".")
++                path.append(json.dumps(key_transform))
++            else:
++                path.append("[%s]" % num)
++        else:
++            # Always treat as object key, never as array index
+             path.append(".")
+             path.append(json.dumps(key_transform))
+-        else:
+-            path.append("[%s]" % num)
+     return "".join(path)
+ 
+ 
+@@ -191,13 +196,18 @@ class HasKeyLookup(PostgresOperatorLookup):
+         for key in rhs:
+             if isinstance(key, KeyTransform):
+                 *_, rhs_key_transforms = key.preprocess_lhs(compiler, connection)
++                # KeyTransform keys should be treated normally (numeric keys as array indices)
++                treat_numeric_as_int = True
+             else:
+                 rhs_key_transforms = [key]
++                # User-provided string keys should not be converted to array indices
++                # (they are always object keys, not array indices)
++                treat_numeric_as_int = False
+             rhs_params.append(
+                 "%s%s"
+                 % (
+                     lhs_json_path,
+-                    compile_json_path(rhs_key_transforms, include_root=False),
++                    compile_json_path(rhs_key_transforms, include_root=False, treat_numeric_as_int=treat_numeric_as_int),
+                 )
+             )
+         # Add condition for each key.
+@@ -398,14 +408,14 @@ class KeyTransformIsNull(lookups.IsNull):
+         return "(NOT %s OR %s IS NULL)" % (sql, lhs), tuple(params) + tuple(lhs_params)
+ 
+     def as_sqlite(self, compiler, connection):
++        lhs, lhs_params, key_transforms = self.lhs.preprocess_lhs(
++            compiler, connection
++        )
++        json_path = compile_json_path(key_transforms)
+         template = "JSON_TYPE(%s, %%s) IS NULL"
+         if not self.rhs:
+             template = "JSON_TYPE(%s, %%s) IS NOT NULL"
+-        return HasKey(self.lhs.lhs, self.lhs.key_name).as_sql(
+-            compiler,
+-            connection,
+-            template=template,
+-        )
++        return template % lhs, tuple(lhs_params) + (json_path,)
+ 
+ 
+ class KeyTransformIn(lookups.In):
+diff --git a/fix_json_numeric_keys.py b/fix_json_numeric_keys.py
+new file mode 100644
+index 0000000000..48de70eeae
+--- /dev/null
++++ b/fix_json_numeric_keys.py
+@@ -0,0 +1,70 @@
++#!/usr/bin/env python3
++"""
++This script will fix the issue with numeric keys in JSONField has_key lookups.
++The problem is in the compile_json_path function which incorrectly converts
++numeric string keys to array indices.
++"""
++
++import re
++
++# Read the file
++with open('/testbed/django/db/models/fields/json.py', 'r') as f:
++    content = f.read()
++
++# Find and replace the compile_json_path function
++old_function = '''def compile_json_path(key_transforms, include_root=True):
++    path = ["$"] if include_root else []
++    for key_transform in key_transforms:
++        try:
++            num = int(key_transform)
++        except ValueError:  # non-integer
++            path.append(".")
++            path.append(json.dumps(key_transform))
++        else:
++            path.append("[%s]" % num)
++    return "".join(path)'''
++
++new_function = '''def compile_json_path(key_transforms, include_root=True, treat_numeric_as_int=True):
++    path = ["$"] if include_root else []
++    for key_transform in key_transforms:
++        if treat_numeric_as_int:
++            try:
++                num = int(key_transform)
++            except ValueError:  # non-integer
++                path.append(".")
++                path.append(json.dumps(key_transform))
++            else:
++                path.append("[%s]" % num)
++        else:
++            # Always treat as object key, never as array index
++            path.append(".")
++            path.append(json.dumps(key_transform))
++    return "".join(path)'''
++
++content = content.replace(old_function, new_function)
++
++# Now update the HasKeyLookup.as_sql method to use treat_numeric_as_int=False
++# Find the line that calls compile_json_path in HasKeyLookup.as_sql
++old_call = '''            rhs_params.append(
++                "%s%s"
++                % (
++                    lhs_json_path,
++                    compile_json_path(rhs_key_transforms, include_root=False),
++                )
++            )'''
++
++new_call = '''            rhs_params.append(
++                "%s%s"
++                % (
++                    lhs_json_path,
++                    compile_json_path(rhs_key_transforms, include_root=False, treat_numeric_as_int=False),
++                )
++            )'''
++
++content = content.replace(old_call, new_call)
++
++# Write the file back
++with open('/testbed/django/db/models/fields/json.py', 'w') as f:
++    f.write(content)
++
++print("Fixed the compile_json_path function and HasKeyLookup.as_sql method")
+diff --git a/fix_json_numeric_keys_v2.py b/fix_json_numeric_keys_v2.py
+new file mode 100644
+index 0000000000..1eeb1882fe
+--- /dev/null
++++ b/fix_json_numeric_keys_v2.py
+@@ -0,0 +1,61 @@
++#!/usr/bin/env python3
++"""
++This script will fix the issue with numeric keys in JSONField has_key lookups.
++The problem is in the compile_json_path function which incorrectly converts
++numeric string keys to array indices.
++"""
++
++# Read the file
++with open('/testbed/django/db/models/fields/json.py', 'r') as f:
++    content = f.read()
++
++# Find and replace the HasKeyLookup.as_sql method
++old_code = '''        sql = template % lhs
++        # Process JSON path from the right-hand side.
++        rhs = self.rhs
++        rhs_params = []
++        if not isinstance(rhs, (list, tuple)):
++            rhs = [rhs]
++        for key in rhs:
++            if isinstance(key, KeyTransform):
++                *_, rhs_key_transforms = key.preprocess_lhs(compiler, connection)
++            else:
++                rhs_key_transforms = [key]
++            rhs_params.append(
++                "%s%s"
++                % (
++                    lhs_json_path,
++                    compile_json_path(rhs_key_transforms, include_root=False, treat_numeric_as_int=False),
++                )
++            )'''
++
++new_code = '''        sql = template % lhs
++        # Process JSON path from the right-hand side.
++        rhs = self.rhs
++        rhs_params = []
++        if not isinstance(rhs, (list, tuple)):
++            rhs = [rhs]
++        for key in rhs:
++            if isinstance(key, KeyTransform):
++                *_, rhs_key_transforms = key.preprocess_lhs(compiler, connection)
++                # KeyTransform keys should be treated normally (numeric keys as array indices)
++                treat_numeric_as_int = True
++            else:
++                rhs_key_transforms = [key]
++                # User-provided string keys should not be converted to array indices
++                treat_numeric_as_int = False
++            rhs_params.append(
++                "%s%s"
++                % (
++                    lhs_json_path,
++                    compile_json_path(rhs_key_transforms, include_root=False, treat_numeric_as_int=treat_numeric_as_int),
++                )
++            )'''
++
++content = content.replace(old_code, new_code)
++
++# Write the file back
++with open('/testbed/django/db/models/fields/json.py', 'w') as f:
++    f.write(content)
++
++print("Fixed the HasKeyLookup.as_sql method to handle KeyTransform vs string keys correctly")
+diff --git a/fix_json_numeric_keys_v3.py b/fix_json_numeric_keys_v3.py
+new file mode 100644
+index 0000000000..424270987a
+--- /dev/null
++++ b/fix_json_numeric_keys_v3.py
+@@ -0,0 +1,77 @@
++#!/usr/bin/env python3
++"""
++This script will fix the issue with numeric keys in JSONField has_key lookups.
++The problem is in the compile_json_path function which incorrectly converts
++numeric string keys to array indices when they should be treated as object keys.
++"""
++
++# Read the file
++with open('/testbed/django/db/models/fields/json.py', 'r') as f:
++    content = f.read()
++
++# Find and replace the HasKeyLookup.as_sql method
++old_code = '''        sql = template % lhs
++        # Process JSON path from the right-hand side.
++        rhs = self.rhs
++        rhs_params = []
++        if not isinstance(rhs, (list, tuple)):
++            rhs = [rhs]
++        for key in rhs:
++            if isinstance(key, KeyTransform):
++                *_, rhs_key_transforms = key.preprocess_lhs(compiler, connection)
++                # KeyTransform keys should be treated normally (numeric keys as array indices)
++                treat_numeric_as_int = True
++            else:
++                rhs_key_transforms = [key]
++                # User-provided string keys should not be converted to array indices
++                treat_numeric_as_int = False
++            rhs_params.append(
++                "%s%s"
++                % (
++                    lhs_json_path,
++                    compile_json_path(rhs_key_transforms, include_root=False, treat_numeric_as_int=treat_numeric_as_int),
++                )
++            )'''
++
++new_code = '''        sql = template % lhs
++        # Process JSON path from the right-hand side.
++        rhs = self.rhs
++        rhs_params = []
++        if not isinstance(rhs, (list, tuple)):
++            rhs = [rhs]
++        for key in rhs:
++            if isinstance(key, KeyTransform):
++                *_, rhs_key_transforms = key.preprocess_lhs(compiler, connection)
++                # KeyTransform keys should be treated normally (numeric keys as array indices)
++                treat_numeric_as_int = True
++            else:
++                rhs_key_transforms = [key]
++                # Check if this is a numeric key from a KeyTransform chain
++                # (e.g., from KeyTransformIsNull) or a user-provided key
++                # If the LHS is a KeyTransform and the key is numeric, treat it as array index
++                if isinstance(self.lhs, KeyTransform) and isinstance(key, str):
++                    try:
++                        int(key)
++                        # It's a numeric key from a KeyTransform chain
++                        treat_numeric_as_int = True
++                    except (ValueError, TypeError):
++                        # It's a non-numeric user-provided key
++                        treat_numeric_as_int = False
++                else:
++                    # User-provided string keys should not be converted to array indices
++                    treat_numeric_as_int = False
++            rhs_params.append(
++                "%s%s"
++                % (
++                    lhs_json_path,
++                    compile_json_path(rhs_key_transforms, include_root=False, treat_numeric_as_int=treat_numeric_as_int),
++                )
++            )'''
++
++content = content.replace(old_code, new_code)
++
++# Write the file back
++with open('/testbed/django/db/models/fields/json.py', 'w') as f:
++    f.write(content)
++
++print("Fixed the HasKeyLookup.as_sql method to handle numeric keys correctly")
+diff --git a/fix_json_numeric_keys_v4.py b/fix_json_numeric_keys_v4.py
+new file mode 100644
+index 0000000000..94adeab723
+--- /dev/null
++++ b/fix_json_numeric_keys_v4.py
+@@ -0,0 +1,87 @@
++#!/usr/bin/env python3
++"""
++This script will fix the issue with numeric keys in JSONField has_key lookups.
++The problem is distinguishing between numeric keys from KeyTransform chains
++(which should be array indices) and user-provided numeric keys (which should be object keys).
++"""
++
++# Read the file
++with open('/testbed/django/db/models/fields/json.py', 'r') as f:
++    content = f.read()
++
++# Find and replace the HasKeyLookup.as_sql method
++old_code = '''        sql = template % lhs
++        # Process JSON path from the right-hand side.
++        rhs = self.rhs
++        rhs_params = []
++        if not isinstance(rhs, (list, tuple)):
++            rhs = [rhs]
++        for key in rhs:
++            if isinstance(key, KeyTransform):
++                *_, rhs_key_transforms = key.preprocess_lhs(compiler, connection)
++                # KeyTransform keys should be treated normally (numeric keys as array indices)
++                treat_numeric_as_int = True
++            else:
++                rhs_key_transforms = [key]
++                # Check if this is a numeric key from a KeyTransform chain
++                # (e.g., from KeyTransformIsNull) or a user-provided key
++                # If the LHS is a KeyTransform and the key is numeric, treat it as array index
++                if isinstance(self.lhs, KeyTransform) and isinstance(key, str):
++                    try:
++                        int(key)
++                        # It's a numeric key from a KeyTransform chain
++                        treat_numeric_as_int = True
++                    except (ValueError, TypeError):
++                        # It's a non-numeric user-provided key
++                        treat_numeric_as_int = False
++                else:
++                    # User-provided string keys should not be converted to array indices
++                    treat_numeric_as_int = False
++            rhs_params.append(
++                "%s%s"
++                % (
++                    lhs_json_path,
++                    compile_json_path(rhs_key_transforms, include_root=False, treat_numeric_as_int=treat_numeric_as_int),
++                )
++            )'''
++
++new_code = '''        sql = template % lhs
++        # Process JSON path from the right-hand side.
++        rhs = self.rhs
++        rhs_params = []
++        if not isinstance(rhs, (list, tuple)):
++            rhs = [rhs]
++        for key in rhs:
++            if isinstance(key, KeyTransform):
++                *_, rhs_key_transforms = key.preprocess_lhs(compiler, connection)
++                # KeyTransform keys should be treated normally (numeric keys as array indices)
++                treat_numeric_as_int = True
++            else:
++                rhs_key_transforms = [key]
++                # Check if this is a numeric key from a KeyTransform chain
++                # (e.g., from KeyTransformIsNull) or a user-provided key.
++                # If the LHS is a KeyTransform and the key matches the last key in the
++                # LHS chain, then it came from a KeyTransform chain and should be treated
++                # as an array index if numeric. Otherwise, it's a user-provided key.
++                treat_numeric_as_int = False
++                if isinstance(self.lhs, KeyTransform) and isinstance(key, str):
++                    # Get the last key in the LHS KeyTransform chain
++                    lhs_key = self.lhs.key_name
++                    if key == lhs_key:
++                        # This key came from the LHS KeyTransform chain
++                        treat_numeric_as_int = True
++            rhs_params.append(
++                "%s%s"
++                % (
++                    lhs_json_path,
++                    compile_json_path(rhs_key_transforms, include_root=False, treat_numeric_as_int=treat_numeric_as_int),
++                )
++            )'''
++
++content = content.replace(old_code, new_code)
++
++# Write the file back
++with open('/testbed/django/db/models/fields/json.py', 'w') as f:
++    f.write(content)
++
++print("Fixed the HasKeyLookup.as_sql method to correctly distinguish between KeyTransform keys and user-provided keys")
+diff --git a/fix_json_numeric_keys_v5.py b/fix_json_numeric_keys_v5.py
+new file mode 100644
+index 0000000000..6a969f6007
+--- /dev/null
++++ b/fix_json_numeric_keys_v5.py
+@@ -0,0 +1,76 @@
++#!/usr/bin/env python3
++"""
++This script will fix the issue with numeric keys in JSONField has_key lookups.
++The problem is distinguishing between numeric keys from KeyTransform chains
++(which should be array indices) and user-provided numeric keys (which should be object keys).
++"""
++
++# Read the file
++with open('/testbed/django/db/models/fields/json.py', 'r') as f:
++    content = f.read()
++
++# Find and replace the HasKeyLookup.as_sql method
++old_code = '''        sql = template % lhs
++        # Process JSON path from the right-hand side.
++        rhs = self.rhs
++        rhs_params = []
++        if not isinstance(rhs, (list, tuple)):
++            rhs = [rhs]
++        for key in rhs:
++            if isinstance(key, KeyTransform):
++                *_, rhs_key_transforms = key.preprocess_lhs(compiler, connection)
++                # KeyTransform keys should be treated normally (numeric keys as array indices)
++                treat_numeric_as_int = True
++            else:
++                rhs_key_transforms = [key]
++                # Check if this is a numeric key from a KeyTransform chain
++                # (e.g., from KeyTransformIsNull) or a user-provided key.
++                # If the LHS is a KeyTransform and the key matches the last key in the
++                # LHS chain, then it came from a KeyTransform chain and should be treated
++                # as an array index if numeric. Otherwise, it's a user-provided key.
++                treat_numeric_as_int = False
++                if isinstance(self.lhs, KeyTransform) and isinstance(key, str):
++                    # Get the last key in the LHS KeyTransform chain
++                    lhs_key = self.lhs.key_name
++                    if key == lhs_key:
++                        # This key came from the LHS KeyTransform chain
++                        treat_numeric_as_int = True
++            rhs_params.append(
++                "%s%s"
++                % (
++                    lhs_json_path,
++                    compile_json_path(rhs_key_transforms, include_root=False, treat_numeric_as_int=treat_numeric_as_int),
++                )
++            )'''
++
++new_code = '''        sql = template % lhs
++        # Process JSON path from the right-hand side.
++        rhs = self.rhs
++        rhs_params = []
++        if not isinstance(rhs, (list, tuple)):
++            rhs = [rhs]
++        for key in rhs:
++            if isinstance(key, KeyTransform):
++                *_, rhs_key_transforms = key.preprocess_lhs(compiler, connection)
++                # KeyTransform keys should be treated normally (numeric keys as array indices)
++                treat_numeric_as_int = True
++            else:
++                rhs_key_transforms = [key]
++                # User-provided string keys should not be converted to array indices
++                # (they are always object keys, not array indices)
++                treat_numeric_as_int = False
++            rhs_params.append(
++                "%s%s"
++                % (
++                    lhs_json_path,
++                    compile_json_path(rhs_key_transforms, include_root=False, treat_numeric_as_int=treat_numeric_as_int),
++                )
++            )'''
++
++content = content.replace(old_code, new_code)
++
++# Write the file back
++with open('/testbed/django/db/models/fields/json.py', 'w') as f:
++    f.write(content)
++
++print("Fixed the HasKeyLookup.as_sql method to treat user-provided keys as object keys")
+diff --git a/fix_keytransform_isnull.py b/fix_keytransform_isnull.py
+new file mode 100644
+index 0000000000..179d65e17b
+--- /dev/null
++++ b/fix_keytransform_isnull.py
+@@ -0,0 +1,39 @@
++#!/usr/bin/env python3
++"""
++This script will fix the KeyTransformIsNull.as_sqlite method to use KeyTransform
++directly instead of using HasKey, which doesn't preserve the information that
++the key came from a KeyTransform chain.
++"""
++
++# Read the file
++with open('/testbed/django/db/models/fields/json.py', 'r') as f:
++    content = f.read()
++
++# Find and replace the KeyTransformIsNull.as_sqlite method
++old_code = '''    def as_sqlite(self, compiler, connection):
++        template = "JSON_TYPE(%s, %%s) IS NULL"
++        if not self.rhs:
++            template = "JSON_TYPE(%s, %%s) IS NOT NULL"
++        return HasKey(self.lhs.lhs, self.lhs.key_name).as_sql(
++            compiler,
++            connection,
++            template=template,
++        )'''
++
++new_code = '''    def as_sqlite(self, compiler, connection):
++        lhs, lhs_params, key_transforms = self.lhs.preprocess_lhs(
++            compiler, connection
++        )
++        json_path = compile_json_path(key_transforms)
++        template = "JSON_TYPE(%s, %%s) IS NULL"
++        if not self.rhs:
++            template = "JSON_TYPE(%s, %%s) IS NOT NULL"
++        return template % lhs, tuple(lhs_params) + (json_path,)'''
++
++content = content.replace(old_code, new_code)
++
++# Write the file back
++with open('/testbed/django/db/models/fields/json.py', 'w') as f:
++    f.write(content)
++
++print("Fixed the KeyTransformIsNull.as_sqlite method to use KeyTransform directly")
+diff --git a/search_tool.py b/search_tool.py
+new file mode 100644
+index 0000000000..9fc766a62e
+--- /dev/null
++++ b/search_tool.py
+@@ -0,0 +1,46 @@
++#!/usr/bin/env python3
++import os
++import re
++from pathlib import Path
++
++def search_in_files(pattern, directory, file_pattern="*.py"):
++    """Search for pattern in files matching file_pattern in directory"""
++    results = {}
++    for root, dirs, files in os.walk(directory):
++        # Skip test directories for now
++        if 'test' in root:
++            continue
++        for file in files:
++            if file.endswith('.py'):
++                filepath = os.path.join(root, file)
++                try:
++                    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
++                        content = f.read()
++                        if re.search(pattern, content, re.IGNORECASE):
++                            results[filepath] = content
++                except:
++                    pass
++    return results
++
++def find_class_definition(content, class_name):
++    """Find class definition and return surrounding context"""
++    lines = content.split('\n')
++    for i, line in enumerate(lines):
++        if f'class {class_name}' in line:
++            start = max(0, i - 2)
++            end = min(len(lines), i + 50)
++            return '\n'.join(lines[start:end])
++    return None
++
++# Search for JSONField and has_key implementations
++print("Searching for JSONField implementations...")
++json_files = search_in_files(r'class JSONField', '/testbed/django/db')
++print(f"Found {len(json_files)} files with JSONField")
++for filepath in json_files:
++    print(f"  - {filepath}")
++
++print("\nSearching for has_key lookup implementations...")
++has_key_files = search_in_files(r'has_key|HasKey', '/testbed/django/db')
++print(f"Found {len(has_key_files)} files with has_key")
++for filepath in has_key_files:
++    print(f"  - {filepath}")
+diff --git a/test_debug_mixed.py b/test_debug_mixed.py
+new file mode 100644
+index 0000000000..a3f73d0443
+--- /dev/null
++++ b/test_debug_mixed.py
+@@ -0,0 +1,55 @@
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++    django.setup()
++
++from django.db import models, connection
++from django.db.models import JSONField
++
++# Create a test model
++class TestModel(models.Model):
++    data = JSONField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Test mixed object and array
++test3 = TestModel(data={'obj': {'0': 'zero', '1': 'one'}, 'arr': ['a', 'b']})
++test3.save()
++
++print("Testing mixed object and array:")
++print(f"  data__obj__has_key='0':")
++result = TestModel.objects.filter(data__obj__has_key='0')
++print(f"    Query: {result.query}")
++print(f"    Count: {result.count()}")
++
++print(f"  data__obj__has_key='1':")
++result = TestModel.objects.filter(data__obj__has_key='1')
++print(f"    Query: {result.query}")
++print(f"    Count: {result.count()}")
++
++print(f"  data__arr__0__isnull=False:")
++result = TestModel.objects.filter(data__arr__0__isnull=False)
++print(f"    Query: {result.query}")
++print(f"    Count: {result.count()}")
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..cdf02e2ee6
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,79 @@
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++    django.setup()
++
++from django.db import models, connection
++from django.db.models import JSONField
++
++# Create a test model
++class TestModel(models.Model):
++    data = JSONField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Test edge cases
++print("Testing edge cases:")
++
++# Test 1: Numeric string keys in objects
++test1 = TestModel(data={'0': 'zero', '1': 'one', '100': 'hundred'})
++test1.save()
++
++c1 = TestModel.objects.filter(data__has_key='0').count()
++c2 = TestModel.objects.filter(data__has_key='1').count()
++c3 = TestModel.objects.filter(data__has_key='100').count()
++print(f"  Numeric string keys in objects: {c1}, {c2}, {c3} (expected 1, 1, 1)")
++assert c1 == 1 and c2 == 1 and c3 == 1
++
++# Test 2: Array with numeric indices
++test2 = TestModel(data={'arr': ['a', 'b', 'c']})
++test2.save()
++
++c4 = TestModel.objects.filter(data__arr__0__isnull=False).count()
++c5 = TestModel.objects.filter(data__arr__1__isnull=False).count()
++c6 = TestModel.objects.filter(data__arr__2__isnull=False).count()
++print(f"  Array with numeric indices: {c4}, {c5}, {c6} (expected 1, 1, 1)")
++assert c4 == 1 and c5 == 1 and c6 == 1
++
++# Test 3: Mixed object and array
++test3 = TestModel(data={'obj': {'0': 'zero', '1': 'one'}, 'arr': ['a', 'b']})
++test3.save()
++
++c7 = TestModel.objects.filter(data__obj__has_key='0').count()
++c8 = TestModel.objects.filter(data__obj__has_key='1').count()
++c9 = TestModel.objects.filter(data__arr__0__isnull=False).count()
++print(f"  Mixed object and array: {c7}, {c8}, {c9} (expected 1, 1, 1)")
++assert c7 == 1 and c8 == 1 and c9 == 1
++
++# Test 4: Non-numeric string keys
++test4 = TestModel(data={'key1': 'value1', 'key2': 'value2'})
++test4.save()
++
++c10 = TestModel.objects.filter(data__has_key='key1').count()
++c11 = TestModel.objects.filter(data__has_key='key2').count()
++print(f"  Non-numeric string keys: {c10}, {c11} (expected 1, 1)")
++assert c10 == 1 and c11 == 1
++
++print("\nAll edge case tests passed!")
+diff --git a/test_edge_cases_fixed.py b/test_edge_cases_fixed.py
+new file mode 100644
+index 0000000000..c464cb5f47
+--- /dev/null
++++ b/test_edge_cases_fixed.py
+@@ -0,0 +1,79 @@
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++    django.setup()
++
++from django.db import models, connection
++from django.db.models import JSONField
++
++# Create a test model
++class TestModel(models.Model):
++    data = JSONField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Test edge cases
++print("Testing edge cases:")
++
++# Test 1: Numeric string keys in objects
++test1 = TestModel(data={'0': 'zero', '1': 'one', '100': 'hundred'})
++test1.save()
++
++c1 = TestModel.objects.filter(data__has_key='0').count()
++c2 = TestModel.objects.filter(data__has_key='1').count()
++c3 = TestModel.objects.filter(data__has_key='100').count()
++print(f"  Numeric string keys in objects: {c1}, {c2}, {c3} (expected 1, 1, 1)")
++assert c1 == 1 and c2 == 1 and c3 == 1
++
++# Test 2: Array with numeric indices
++test2 = TestModel(data={'arr': ['a', 'b', 'c']})
++test2.save()
++
++c4 = TestModel.objects.filter(pk=test2.pk, data__arr__0__isnull=False).count()
++c5 = TestModel.objects.filter(pk=test2.pk, data__arr__1__isnull=False).count()
++c6 = TestModel.objects.filter(pk=test2.pk, data__arr__2__isnull=False).count()
++print(f"  Array with numeric indices: {c4}, {c5}, {c6} (expected 1, 1, 1)")
++assert c4 == 1 and c5 == 1 and c6 == 1
++
++# Test 3: Mixed object and array
++test3 = TestModel(data={'obj': {'0': 'zero', '1': 'one'}, 'arr': ['a', 'b']})
++test3.save()
++
++c7 = TestModel.objects.filter(pk=test3.pk, data__obj__has_key='0').count()
++c8 = TestModel.objects.filter(pk=test3.pk, data__obj__has_key='1').count()
++c9 = TestModel.objects.filter(pk=test3.pk, data__arr__0__isnull=False).count()
++print(f"  Mixed object and array: {c7}, {c8}, {c9} (expected 1, 1, 1)")
++assert c7 == 1 and c8 == 1 and c9 == 1
++
++# Test 4: Non-numeric string keys
++test4 = TestModel(data={'key1': 'value1', 'key2': 'value2'})
++test4.save()
++
++c10 = TestModel.objects.filter(data__has_key='key1').count()
++c11 = TestModel.objects.filter(data__has_key='key2').count()
++print(f"  Non-numeric string keys: {c10}, {c11} (expected 1, 1)")
++assert c10 == 1 and c11 == 1
++
++print("\nAll edge case tests passed!")
+diff --git a/test_json_numeric_keys.py b/test_json_numeric_keys.py
+new file mode 100644
+index 0000000000..e49519b7a0
+--- /dev/null
++++ b/test_json_numeric_keys.py
+@@ -0,0 +1,66 @@
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++    django.setup()
++
++from django.db import models, connection
++from django.db.models import JSONField
++
++# Create a test model
++class TestModel(models.Model):
++    data = JSONField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Test the issue
++test1 = TestModel(data={'foo': 'bar'})
++test2 = TestModel(data={'1111': 'baz'})
++test1.save()
++test2.save()
++
++# Test queries
++print("Testing has_key lookup with string key 'foo':")
++result1 = TestModel.objects.filter(data__has_key='foo')
++print(f"  Query: {result1.query}")
++print(f"  Count: {result1.count()}")
++
++print("\nTesting has_key lookup with numeric string key '1111':")
++result2 = TestModel.objects.filter(data__has_key='1111')
++print(f"  Query: {result2.query}")
++print(f"  Count: {result2.count()}")
++
++print("\nDirect SQL test:")
++from django.db import connection
++cursor = connection.cursor()
++
++# Test what the current code generates
++cursor.execute("SELECT JSON_TYPE(data, '$.foo') IS NOT NULL FROM test_app_testmodel")
++print(f"  JSON_TYPE(data, '$.foo') IS NOT NULL: {cursor.fetchall()}")
++
++cursor.execute("SELECT JSON_TYPE(data, '$[1111]') IS NOT NULL FROM test_app_testmodel")
++print(f"  JSON_TYPE(data, '$[1111]') IS NOT NULL: {cursor.fetchall()}")
++
++cursor.execute("SELECT JSON_TYPE(data, '$.\"1111\"') IS NOT NULL FROM test_app_testmodel")
++print(f"  JSON_TYPE(data, '$.\"1111\"') IS NOT NULL: {cursor.fetchall()}")
+diff --git a/test_keytransform_debug.py b/test_keytransform_debug.py
+new file mode 100644
+index 0000000000..c337738156
+--- /dev/null
++++ b/test_keytransform_debug.py
+@@ -0,0 +1,31 @@
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++    django.setup()
++
++from django.db import models, connection
++from django.db.models import JSONField
++from django.db.models.fields.json import compile_json_path
++
++# Test compile_json_path directly
++print("Testing compile_json_path directly:")
++print(f"  compile_json_path(['d', '0']): {compile_json_path(['d', '0'])}")
++print(f"  compile_json_path(['d', '0'], treat_numeric_as_int=True): {compile_json_path(['d', '0'], treat_numeric_as_int=True)}")
++print(f"  compile_json_path(['d', '0'], treat_numeric_as_int=False): {compile_json_path(['d', '0'], treat_numeric_as_int=False)}")
+diff --git a/test_keytransform_numeric.py b/test_keytransform_numeric.py
+new file mode 100644
+index 0000000000..a729b2c461
+--- /dev/null
++++ b/test_keytransform_numeric.py
+@@ -0,0 +1,60 @@
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++    django.setup()
++
++from django.db import models, connection
++from django.db.models import JSONField
++
++# Create a test model
++class TestModel(models.Model):
++    data = JSONField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Test the issue
++test1 = TestModel(data={'d': ['e', {'f': 'g'}]})
++test1.save()
++
++# Test queries
++print("Testing KeyTransform with numeric key '0':")
++result1 = TestModel.objects.filter(data__d__0__isnull=False)
++print(f"  Query: {result1.query}")
++print(f"  Count: {result1.count()}")
++
++print("\nTesting KeyTransform with numeric key '1':")
++result2 = TestModel.objects.filter(data__d__1__isnull=False)
++print(f"  Query: {result2.query}")
++print(f"  Count: {result2.count()}")
++
++print("\nDirect SQL test:")
++from django.db import connection
++cursor = connection.cursor()
++
++cursor.execute("SELECT JSON_TYPE(data, '$.d[0]') IS NOT NULL FROM test_app_testmodel")
++print(f"  JSON_TYPE(data, '$.d[0]') IS NOT NULL: {cursor.fetchall()}")
++
++cursor.execute("SELECT JSON_TYPE(data, '$.d[1]') IS NOT NULL FROM test_app_testmodel")
++print(f"  JSON_TYPE(data, '$.d[1]') IS NOT NULL: {cursor.fetchall()}")
+diff --git a/test_numeric_keys_comprehensive.py b/test_numeric_keys_comprehensive.py
+new file mode 100644
+index 0000000000..7fb56ef037
+--- /dev/null
++++ b/test_numeric_keys_comprehensive.py
+@@ -0,0 +1,68 @@
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++    django.setup()
++
++from django.db import models, connection
++from django.db.models import JSONField
++
++# Create a test model
++class TestModel(models.Model):
++    data = JSONField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestModel)
++
++# Test data from the PR
++test1 = TestModel(data={'foo': 'bar'})
++test2 = TestModel(data={'1111': 'bar'})
++test1.save()
++test2.save()
++
++# Test has_key lookup
++print("Testing has_key lookup:")
++c1 = TestModel.objects.filter(data__has_key='foo').count()
++c2 = TestModel.objects.filter(data__has_key='1111').count()
++print(f"  has_key='foo': {c1} (expected 1)")
++print(f"  has_key='1111': {c2} (expected 1)")
++
++assert c1 == 1, f"Expected 1 entry with key 'foo', got {c1}"
++assert c2 == 1, f"Expected 1 entry with key '1111', got {c2}"
++
++# Test has_keys lookup
++print("\nTesting has_keys lookup:")
++test3 = TestModel(data={'foo': 'bar', '1111': 'baz'})
++test3.save()
++
++c3 = TestModel.objects.filter(data__has_keys=['foo', '1111']).count()
++print(f"  has_keys=['foo', '1111']: {c3} (expected 1)")
++assert c3 == 1, f"Expected 1 entry with keys 'foo' and '1111', got {c3}"
++
++# Test has_any_keys lookup
++print("\nTesting has_any_keys lookup:")
++c4 = TestModel.objects.filter(data__has_any_keys=['foo', '1111']).count()
++print(f"  has_any_keys=['foo', '1111']: {c4} (expected 3)")
++assert c4 == 3, f"Expected 3 entries with any of keys 'foo' or '1111', got {c4}"
++
++print("\nAll tests passed!")
+diff --git a/test_pr_issue.py b/test_pr_issue.py
+new file mode 100644
+index 0000000000..ea1de066ed
+--- /dev/null
++++ b/test_pr_issue.py
+@@ -0,0 +1,57 @@
++"""
++Test for the PR issue: has_key, has_keys, and has_any_keys JSONField() lookups 
++don't handle numeric keys on SQLite, MySQL, and Oracle.
++"""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        USE_TZ=True,
++    )
++    django.setup()
++
++from django.db import models, connection
++from django.db.models import JSONField
++
++# Create a test model matching the PR example
++class JsonFieldHasKeyTest(models.Model):
++    data = JSONField()
++    
++    class Meta:
++        app_label = 'test_app'
++
++# Create the table
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(JsonFieldHasKeyTest)
++
++# Test data from the PR
++test = JsonFieldHasKeyTest(data={'foo': 'bar'})
++test2 = JsonFieldHasKeyTest(data={'1111': 'bar'})
++test.save()
++test2.save()
++
++# Test from the PR
++print("Testing PR issue:")
++c1 = JsonFieldHasKeyTest.objects.filter(data__has_key='foo').count()
++c2 = JsonFieldHasKeyTest.objects.filter(data__has_key='1111').count()
++print(f"  has_key='foo': {c1} (expected 1)")
++print(f"  has_key='1111': {c2} (expected 1)")
++
++assert c1 == 1, f"Should have found 1 entry with key 'foo', got {c1}"
++assert c2 == 1, f"Should have found 1 entry with key '1111', got {c2}"
++
++print("\nPR issue test PASSED!")

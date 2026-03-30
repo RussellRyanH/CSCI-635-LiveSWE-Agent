@@ -1,0 +1,171 @@
+diff --git a/django/core/management/__init__.py b/django/core/management/__init__.py
+index 5f2e64761e..25e28ae0a9 100644
+--- a/django/core/management/__init__.py
++++ b/django/core/management/__init__.py
+@@ -130,11 +130,18 @@ def call_command(command_name, *args, **options):
+                 yield opt
+ 
+     parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
+     # Any required arguments which are passed in via **options must be passed
+     # to parse_args().
+     parse_args += [
+         '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
+-        for opt in parser_actions if opt.required and opt.dest in options
++        for opt in parser_actions
++        if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in arg_options
+     ]
+     defaults = parser.parse_args(args=parse_args)
+     defaults = dict(defaults._get_kwargs(), **arg_options)
+diff --git a/fix_call_command.py b/fix_call_command.py
+new file mode 100644
+index 0000000000..fbcf95dde7
+--- /dev/null
++++ b/fix_call_command.py
+@@ -0,0 +1,42 @@
++#!/usr/bin/env python3
++"""Script to fix the call_command issue with required mutually exclusive groups."""
++
++import re
++
++# Read the file
++with open('/testbed/django/core/management/__init__.py', 'r') as f:
++    content = f.read()
++
++# Find the section to replace
++old_code = """    parser_actions = list(get_actions(parser))
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if opt.required and opt.dest in options
++    ]"""
++
++new_code = """    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions
++        if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in arg_options
++    ]"""
++
++if old_code in content:
++    content = content.replace(old_code, new_code)
++    with open('/testbed/django/core/management/__init__.py', 'w') as f:
++        f.write(content)
++    print("Fix applied successfully!")
++else:
++    print("ERROR: Could not find the code to replace!")
++    print("Looking for:")
++    print(repr(old_code))
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 0000000000..2f3edc0f68
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,72 @@
++#!/usr/bin/env python3
++"""Test that call_command works with required mutually exclusive groups."""
++
++import os
++import sys
++import django
++from io import StringIO
++
++# Set up Django
++sys.path.insert(0, '/testbed')
++os.environ['DJANGO_SETTINGS_MODULE'] = 'tests.user_commands.tests'
++
++# We need proper settings
++from django.conf import settings
++if not settings.configured:
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'tests.user_commands',
++        ],
++    )
++
++django.setup()
++
++from django.core import management
++
++# Test 1: Passing shop_id via kwargs
++print("Test 1: call_command with shop_id in kwargs...")
++try:
++    out = StringIO()
++    management.call_command('mutually_exclusive_required', shop_id=1, stdout=out)
++    print(f"  PASSED: {out.getvalue().strip()}")
++except Exception as e:
++    print(f"  FAILED: {e}")
++
++# Test 2: Passing shop via kwargs
++print("Test 2: call_command with shop in kwargs...")
++try:
++    out = StringIO()
++    management.call_command('mutually_exclusive_required', shop='myshop', stdout=out)
++    print(f"  PASSED: {out.getvalue().strip()}")
++except Exception as e:
++    print(f"  FAILED: {e}")
++
++# Test 3: Not passing anything should fail
++print("Test 3: call_command with no relevant kwargs (should fail)...")
++try:
++    out = StringIO()
++    management.call_command('mutually_exclusive_required', stdout=out)
++    print(f"  FAILED: Should have raised an error! Output: {out.getvalue().strip()}")
++except SystemExit as e:
++    print(f"  PASSED: Got expected SystemExit(2) - required group not satisfied")
++except Exception as e:
++    print(f"  PASSED: Got expected error: {e}")
++
++# Test 4: Passing via command line args should still work
++print("Test 4: call_command with '--shop-id=1' in args...")
++try:
++    out = StringIO()
++    management.call_command('mutually_exclusive_required', '--shop-id=1', stdout=out)
++    print(f"  PASSED: {out.getvalue().strip()}")
++except Exception as e:
++    print(f"  FAILED: {e}")
++
++print("\nAll tests completed!")
+diff --git a/tests/user_commands/management/commands/mutually_exclusive_required.py b/tests/user_commands/management/commands/mutually_exclusive_required.py
+new file mode 100644
+index 0000000000..5a6169837c
+--- /dev/null
++++ b/tests/user_commands/management/commands/mutually_exclusive_required.py
+@@ -0,0 +1,15 @@
++from django.core.management.base import BaseCommand
++
++
++class Command(BaseCommand):
++
++    def add_arguments(self, parser):
++        group = parser.add_mutually_exclusive_group(required=True)
++        group.add_argument('--shop-id', nargs='?', type=int, default=None, dest='shop_id')
++        group.add_argument('--shop', nargs='?', type=str, default=None, dest='shop')
++
++    def handle(self, *args, **options):
++        if options['shop_id']:
++            self.stdout.write('shop-id: %d' % options['shop_id'])
++        else:
++            self.stdout.write('shop: %s' % options['shop'])

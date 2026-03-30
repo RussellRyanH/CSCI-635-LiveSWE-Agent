@@ -1,0 +1,496 @@
+diff --git a/django/core/management/__init__.py b/django/core/management/__init__.py
+index 5f2e64761e..d21af3bd62 100644
+--- a/django/core/management/__init__.py
++++ b/django/core/management/__init__.py
+@@ -136,6 +136,16 @@ def call_command(command_name, *args, **options):
+         '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
+         for opt in parser_actions if opt.required and opt.dest in options
+     ]
++    # Also add arguments that are part of required mutually exclusive groups
++    for group in parser._mutually_exclusive_groups:
++        if group.required:
++            for action in group._group_actions:
++                if action.dest in options and action.dest in arg_options:
++                    # Only add if not already added
++                    if not any(arg_options[action.dest] in str(arg) for arg in parse_args):
++                        parse_args.append(
++                            '{}={}'.format(min(action.option_strings), arg_options[action.dest])
++                        )
+     defaults = parser.parse_args(args=parse_args)
+     defaults = dict(defaults._get_kwargs(), **arg_options)
+     # Raise an error if any unknown options were passed.
+diff --git a/test_edge_cases.py b/test_edge_cases.py
+new file mode 100644
+index 0000000000..f23b76bcc3
+--- /dev/null
++++ b/test_edge_cases.py
+@@ -0,0 +1,103 @@
++"""Test edge cases for the mutually exclusive group fix"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++    )
++    django.setup()
++
++from django.core.management.base import BaseCommand
++
++class TestCommand(BaseCommand):
++    """Test command with required mutually exclusive group"""
++    
++    def add_arguments(self, parser):
++        shop = parser.add_mutually_exclusive_group(required=True)
++        shop.add_argument('--shop-id', nargs='?', type=int, default=None, dest='shop_id')
++        shop.add_argument('--shop', nargs='?', type=str, default=None, dest='shop_name')
++    
++    def handle(self, *args, **options):
++        print("shop_id: {}".format(options.get('shop_id')))
++        print("shop_name: {}".format(options.get('shop_name')))
++        return "Success"
++
++# Test 1: Both options passed (should fail)
++print("Test 1: Both options passed (should fail)...")
++try:
++    cmd = TestCommand()
++    parser = cmd.create_parser('', 'test_command')
++    
++    opt_mapping = {
++        min(s_opt.option_strings).lstrip('-').replace('-', '_'): s_opt.dest
++        for s_opt in parser._actions if s_opt.option_strings
++    }
++    options = {'shop_id': 1, 'shop_name': 'test'}
++    arg_options = {opt_mapping.get(key, key): value for key, value in options.items()}
++    parse_args = []
++    
++    # New code
++    for group in parser._mutually_exclusive_groups:
++        if group.required:
++            for action in group._group_actions:
++                if action.dest in options and action.dest in arg_options:
++                    if not any(arg_options[action.dest] in str(arg) for arg in parse_args):
++                        parse_args.append(
++                            '{}={}'.format(min(action.option_strings), arg_options[action.dest])
++                        )
++    
++    print("  parse_args: {}".format(parse_args))
++    try:
++        defaults = parser.parse_args(args=parse_args)
++        print("  FAIL: Should have failed but didn't!")
++    except Exception as e:
++        print("  PASS: Failed as expected: {}".format(e))
++        
++except Exception as e:
++    print("FAIL: Test 1 failed: {}".format(e))
++
++# Test 2: shop_id with value 0 (falsy value)
++print("\nTest 2: shop_id with value 0 (falsy value)...")
++try:
++    cmd = TestCommand()
++    parser = cmd.create_parser('', 'test_command')
++    
++    opt_mapping = {
++        min(s_opt.option_strings).lstrip('-').replace('-', '_'): s_opt.dest
++        for s_opt in parser._actions if s_opt.option_strings
++    }
++    options = {'shop_id': 0}
++    arg_options = {opt_mapping.get(key, key): value for key, value in options.items()}
++    parse_args = []
++    
++    # New code
++    for group in parser._mutually_exclusive_groups:
++        if group.required:
++            for action in group._group_actions:
++                if action.dest in options and action.dest in arg_options:
++                    if not any(arg_options[action.dest] in str(arg) for arg in parse_args):
++                        parse_args.append(
++                            '{}={}'.format(min(action.option_strings), arg_options[action.dest])
++                        )
++    
++    print("  parse_args: {}".format(parse_args))
++    defaults = parser.parse_args(args=parse_args)
++    print("  PASS: Successfully parsed!")
++    print("  shop_id: {}".format(defaults.shop_id))
++        
++except Exception as e:
++    print("FAIL: Test 2 failed: {}".format(e))
+diff --git a/test_final_verification.py b/test_final_verification.py
+new file mode 100644
+index 0000000000..0df3184814
+--- /dev/null
++++ b/test_final_verification.py
+@@ -0,0 +1,80 @@
++"""Final verification test for the mutually exclusive group fix"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++            'user_commands',
++        ],
++    )
++    django.setup()
++
++from django.core.management import call_command
++from io import StringIO
++
++# Test 1: Call with shop_id as kwarg (the original issue)
++print("Test 1: call_command('mutually_exclusive', shop_id=1)")
++try:
++    out = StringIO()
++    call_command('mutually_exclusive', shop_id=1, stdout=out)
++    result = out.getvalue()
++    print("  Result: {}".format(result.strip()))
++    if 'shop_id=1' in result:
++        print("  PASS: Successfully called with shop_id=1 as kwarg!")
++    else:
++        print("  FAIL: Unexpected result")
++except Exception as e:
++    print("  FAIL: {}".format(e))
++
++# Test 2: Call with shop_name as kwarg
++print("\nTest 2: call_command('mutually_exclusive', shop_name='test')")
++try:
++    out = StringIO()
++    call_command('mutually_exclusive', shop_name='test', stdout=out)
++    result = out.getvalue()
++    print("  Result: {}".format(result.strip()))
++    if 'shop_name=test' in result:
++        print("  PASS: Successfully called with shop_name='test' as kwarg!")
++    else:
++        print("  FAIL: Unexpected result")
++except Exception as e:
++    print("  FAIL: {}".format(e))
++
++# Test 3: Call with --shop-id as argument (should still work)
++print("\nTest 3: call_command('mutually_exclusive', '--shop-id=1')")
++try:
++    out = StringIO()
++    call_command('mutually_exclusive', '--shop-id=1', stdout=out)
++    result = out.getvalue()
++    print("  Result: {}".format(result.strip()))
++    if 'shop_id=1' in result:
++        print("  PASS: Successfully called with --shop-id=1 as argument!")
++    else:
++        print("  FAIL: Unexpected result")
++except Exception as e:
++    print("  FAIL: {}".format(e))
++
++# Test 4: Call without any shop argument (should fail)
++print("\nTest 4: call_command('mutually_exclusive') - should fail")
++try:
++    out = StringIO()
++    call_command('mutually_exclusive', stdout=out)
++    print("  FAIL: Should have raised an error!")
++except Exception as e:
++    if 'one of the arguments' in str(e):
++        print("  PASS: Correctly raised error: {}".format(e))
++    else:
++        print("  FAIL: Wrong error: {}".format(e))
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 0000000000..cd98ff5c84
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,125 @@
++"""Test script to verify the fix for mutually exclusive group issue"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++    )
++    django.setup()
++
++from django.core.management.base import BaseCommand
++
++class TestCommand(BaseCommand):
++    """Test command with required mutually exclusive group"""
++    
++    def add_arguments(self, parser):
++        shop = parser.add_mutually_exclusive_group(required=True)
++        shop.add_argument('--shop-id', nargs='?', type=int, default=None, dest='shop_id')
++        shop.add_argument('--shop', nargs='?', type=str, default=None, dest='shop_name')
++    
++    def handle(self, *args, **options):
++        print("shop_id: {}".format(options.get('shop_id')))
++        print("shop_name: {}".format(options.get('shop_name')))
++        return "Success"
++
++# Test 1: Simulate what call_command does with shop_id as kwarg
++print("Test 1: Simulating call_command with shop_id=1 as kwarg...")
++try:
++    cmd = TestCommand()
++    parser = cmd.create_parser('', 'test_command')
++    
++    # This is what call_command does
++    opt_mapping = {
++        min(s_opt.option_strings).lstrip('-').replace('-', '_'): s_opt.dest
++        for s_opt in parser._actions if s_opt.option_strings
++    }
++    options = {'shop_id': 1}
++    arg_options = {opt_mapping.get(key, key): value for key, value in options.items()}
++    parse_args = []
++    
++    # Original code - only adds required arguments
++    parse_args_original = [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser._actions if opt.required and opt.dest in options
++    ]
++    
++    # New code - also adds arguments from required mutually exclusive groups
++    parse_args_new = parse_args_original.copy()
++    for group in parser._mutually_exclusive_groups:
++        if group.required:
++            for action in group._group_actions:
++                if action.dest in options and action.dest in arg_options:
++                    # Only add if not already added
++                    if not any(arg_options[action.dest] in str(arg) for arg in parse_args_new):
++                        parse_args_new.append(
++                            '{}={}'.format(min(action.option_strings), arg_options[action.dest])
++                        )
++    
++    print("  Original parse_args: {}".format(parse_args_original))
++    print("  New parse_args: {}".format(parse_args_new))
++    
++    # Try with original (should fail)
++    print("  Trying with original parse_args...")
++    try:
++        defaults = parser.parse_args(args=parse_args_original)
++        print("  FAIL: Should have failed but didn't!")
++    except Exception as e:
++        print("  Expected failure: {}".format(e))
++    
++    # Try with new (should succeed)
++    print("  Trying with new parse_args...")
++    try:
++        defaults = parser.parse_args(args=parse_args_new)
++        print("  PASS: Successfully parsed with new parse_args!")
++        print("  Parsed values: {}".format(dict(defaults._get_kwargs())))
++    except Exception as e:
++        print("  FAIL: {}".format(e))
++        
++except Exception as e:
++    print("FAIL: Test 1 failed: {}".format(e))
++
++# Test 2: Call with shop_name as kwarg
++print("\nTest 2: Simulating call_command with shop_name='test' as kwarg...")
++try:
++    cmd = TestCommand()
++    parser = cmd.create_parser('', 'test_command')
++    
++    opt_mapping = {
++        min(s_opt.option_strings).lstrip('-').replace('-', '_'): s_opt.dest
++        for s_opt in parser._actions if s_opt.option_strings
++    }
++    options = {'shop_name': 'test'}
++    arg_options = {opt_mapping.get(key, key): value for key, value in options.items()}
++    parse_args = []
++    
++    # New code
++    for group in parser._mutually_exclusive_groups:
++        if group.required:
++            for action in group._group_actions:
++                if action.dest in options and action.dest in arg_options:
++                    if not any(arg_options[action.dest] in str(arg) for arg in parse_args):
++                        parse_args.append(
++                            '{}={}'.format(min(action.option_strings), arg_options[action.dest])
++                        )
++    
++    print("  parse_args: {}".format(parse_args))
++    defaults = parser.parse_args(args=parse_args)
++    print("  PASS: Successfully parsed!")
++    print("  Parsed values: {}".format(dict(defaults._get_kwargs())))
++        
++except Exception as e:
++    print("FAIL: Test 2 failed: {}".format(e))
+diff --git a/test_mutually_exclusive.py b/test_mutually_exclusive.py
+new file mode 100644
+index 0000000000..db3a597c00
+--- /dev/null
++++ b/test_mutually_exclusive.py
+@@ -0,0 +1,71 @@
++"""Test script to reproduce the mutually exclusive group issue"""
++import os
++import sys
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++    )
++    django.setup()
++
++from django.core.management.base import BaseCommand
++
++class TestCommand(BaseCommand):
++    """Test command with required mutually exclusive group"""
++    
++    def add_arguments(self, parser):
++        shop = parser.add_mutually_exclusive_group(required=True)
++        shop.add_argument('--shop-id', nargs='?', type=int, default=None, dest='shop_id')
++        shop.add_argument('--shop', nargs='?', type=str, default=None, dest='shop_name')
++    
++    def handle(self, *args, **options):
++        print("shop_id: {}".format(options.get('shop_id')))
++        print("shop_name: {}".format(options.get('shop_name')))
++        return "Success"
++
++# Test 1: Call with shop_id as kwarg (this should fail with current code)
++print("Test 1: Calling with shop_id=1 as kwarg...")
++try:
++    cmd = TestCommand()
++    parser = cmd.create_parser('', 'test_command')
++    
++    # This is what call_command does - it tries to parse args
++    # The issue is that it doesn't handle mutually exclusive groups
++    parse_args = []
++    
++    # Current code only adds required arguments
++    for opt in parser._actions:
++        if opt.required:
++            print("Found required action: {}".format(opt))
++    
++    # Try to parse with empty args - this should fail
++    try:
++        defaults = parser.parse_args(args=parse_args)
++        print("FAIL: Test 1: Should have failed but didn't!")
++    except Exception as e:
++        print("PASS: Test 1: Failed as expected with: {}".format(e))
++except Exception as e:
++    print("FAIL: Test 1 failed: {}".format(e))
++
++# Test 2: Call with shop_id as argument string (this should work)
++print("\nTest 2: Calling with --shop-id=1 as argument string...")
++try:
++    cmd = TestCommand()
++    parser = cmd.create_parser('', 'test_command')
++    defaults = parser.parse_args(args=['--shop-id=1'])
++    print("PASS: Test 2 passed! Parsed: {}".format(dict(defaults._get_kwargs())))
++except Exception as e:
++    print("FAIL: Test 2 failed: {}".format(e))
+diff --git a/tests/user_commands/management/commands/mutually_exclusive.py b/tests/user_commands/management/commands/mutually_exclusive.py
+new file mode 100644
+index 0000000000..ffa056cc2b
+--- /dev/null
++++ b/tests/user_commands/management/commands/mutually_exclusive.py
+@@ -0,0 +1,16 @@
++from django.core.management.base import BaseCommand
++
++
++class Command(BaseCommand):
++    """Command with required mutually exclusive group"""
++
++    def add_arguments(self, parser):
++        shop = parser.add_mutually_exclusive_group(required=True)
++        shop.add_argument('--shop-id', nargs='?', type=int, default=None, dest='shop_id')
++        shop.add_argument('--shop', nargs='?', type=str, default=None, dest='shop_name')
++
++    def handle(self, *args, **options):
++        self.stdout.write('shop_id={},shop_name={}'.format(
++            options.get('shop_id'),
++            options.get('shop_name')
++        ))
+diff --git a/tests/user_commands/tests.py b/tests/user_commands/tests.py
+index a53c781ac6..e03360e11d 100644
+--- a/tests/user_commands/tests.py
++++ b/tests/user_commands/tests.py
+@@ -255,6 +255,45 @@ class CommandTests(SimpleTestCase):
+         self.assertEqual(parser.epilog, epilog)
+ 
+ 
++    def test_mutually_exclusive_group_with_kwarg(self):
++        """
++        Test that call_command works with mutually exclusive group arguments
++        passed as kwargs (issue from PR description).
++        """
++        out = StringIO()
++        # Test with shop_id as kwarg
++        management.call_command('mutually_exclusive', shop_id=1, stdout=out)
++        self.assertIn('shop_id=1,shop_name=None', out.getvalue())
++
++    def test_mutually_exclusive_group_with_kwarg_shop_name(self):
++        """
++        Test that call_command works with mutually exclusive group arguments
++        passed as kwargs for the other option.
++        """
++        out = StringIO()
++        # Test with shop_name as kwarg
++        management.call_command('mutually_exclusive', shop_name='test', stdout=out)
++        self.assertIn('shop_id=None,shop_name=test', out.getvalue())
++
++    def test_mutually_exclusive_group_with_args(self):
++        """
++        Test that call_command still works with mutually exclusive group arguments
++        passed as command line arguments.
++        """
++        out = StringIO()
++        # Test with --shop-id as argument
++        management.call_command('mutually_exclusive', '--shop-id=1', stdout=out)
++        self.assertIn('shop_id=1,shop_name=None', out.getvalue())
++
++    def test_mutually_exclusive_group_missing_required(self):
++        """
++        Test that call_command raises an error when required mutually exclusive
++        group argument is missing.
++        """
++        with self.assertRaisesMessage(CommandError, 'one of the arguments'):
++            management.call_command('mutually_exclusive')
++
++
+ class CommandRunTests(AdminScriptTestCase):
+     """
+     Tests that need to run by simulating the command line, not by call_command.

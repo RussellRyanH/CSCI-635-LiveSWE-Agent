@@ -1,0 +1,116 @@
+diff --git a/django/core/serializers/python.py b/django/core/serializers/python.py
+index 36048601af..4ad563ba43 100644
+--- a/django/core/serializers/python.py
++++ b/django/core/serializers/python.py
+@@ -79,7 +79,7 @@ class Serializer(base.Serializer):
+                     return self._value_from_field(value, value._meta.pk)
+ 
+                 def queryset_iterator(obj, field):
+-                    return getattr(obj, field.name).only("pk").iterator()
++                    return getattr(obj, field.name).select_related(None).only("pk").iterator()
+ 
+             m2m_iter = getattr(obj, "_prefetched_objects_cache", {}).get(
+                 field.name,
+diff --git a/reproduce.py b/reproduce.py
+new file mode 100644
+index 0000000000..d089b5065f
+--- /dev/null
++++ b/reproduce.py
+@@ -0,0 +1,48 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.core import serializers
++
++settings.configure(
++    DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}},
++    INSTALLED_APPS=['__main__'],
++)
++django.setup()
++
++class TestTagManager(models.Manager):
++    def get_queryset(self):
++        qs = super().get_queryset()
++        qs = qs.select_related("master")
++        return qs
++
++class TestTagMaster(models.Model):
++    name = models.CharField(max_length=120)
++
++class TestTag(models.Model):
++    objects = TestTagManager()
++    name = models.CharField(max_length=120)
++    master = models.ForeignKey(TestTagMaster, on_delete=models.SET_NULL, null=True)
++
++class Test(models.Model):
++    name = models.CharField(max_length=120)
++    tags = models.ManyToManyField(TestTag, blank=True)
++
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestTagMaster)
++    schema_editor.create_model(TestTag)
++    schema_editor.create_model(Test)
++
++tag_master = TestTagMaster.objects.create(name="master")
++tag = TestTag.objects.create(name="tag", master=tag_master)
++test = Test.objects.create(name="test")
++test.tags.add(tag)
++test.save()
++
++try:
++    serializers.serialize("json", [test])
++    print("Success!")
++except Exception as e:
++    import traceback
++    traceback.print_exc()
+diff --git a/test_fix.py b/test_fix.py
+new file mode 100644
+index 0000000000..eff99bf754
+--- /dev/null
++++ b/test_fix.py
+@@ -0,0 +1,43 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.core import serializers
++
++settings.configure(
++    DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}},
++    INSTALLED_APPS=['__main__'],
++)
++django.setup()
++
++class TestTagManager(models.Manager):
++    def get_queryset(self):
++        qs = super().get_queryset()
++        qs = qs.select_related("master")
++        return qs
++
++class TestTagMaster(models.Model):
++    name = models.CharField(max_length=120)
++
++class TestTag(models.Model):
++    objects = TestTagManager()
++    name = models.CharField(max_length=120)
++    master = models.ForeignKey(TestTagMaster, on_delete=models.SET_NULL, null=True)
++
++class Test(models.Model):
++    name = models.CharField(max_length=120)
++    tags = models.ManyToManyField(TestTag, blank=True)
++
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestTagMaster)
++    schema_editor.create_model(TestTag)
++    schema_editor.create_model(Test)
++
++tag_master = TestTagMaster.objects.create(name="master")
++tag = TestTag.objects.create(name="tag", master=tag_master)
++test = Test.objects.create(name="test")
++test.tags.add(tag)
++test.save()
++
++print(list(test.tags.select_related(None).only("pk").iterator()))

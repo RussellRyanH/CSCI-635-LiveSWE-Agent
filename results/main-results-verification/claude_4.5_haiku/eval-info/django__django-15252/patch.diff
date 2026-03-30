@@ -1,0 +1,135 @@
+diff --git a/django/db/migrations/executor.py b/django/db/migrations/executor.py
+index aa2fe0883b..e6b45472b5 100644
+--- a/django/db/migrations/executor.py
++++ b/django/db/migrations/executor.py
+@@ -95,12 +95,20 @@ class MigrationExecutor:
+         Django first needs to create all project states before a migration is
+         (un)applied and in a second step run all the database operations.
+         """
+-        # The django_migrations table must be present to record applied
+-        # migrations.
+-        self.recorder.ensure_schema()
+-
+         if plan is None:
+             plan = self.migration_plan(targets)
++        
++        # The django_migrations table must be present to record applied
++        # migrations. Only create it if migrations are allowed on this database.
++        if plan:
++            # Check if migrations are allowed for any app in the plan
++            from django.db import router
++            apps_in_plan = {migration.app_label for migration, _ in plan}
++            if any(router.allow_migrate(self.connection.alias, app) for app in apps_in_plan):
++                self.recorder.ensure_schema()
++        else:
++            # If plan is empty, still ensure schema in case we need to read applied migrations
++            self.recorder.ensure_schema()
+         # Create the forwards plan Django would follow on an empty database
+         full_plan = self.migration_plan(self.loader.graph.leaf_nodes(), clean_start=True)
+ 
+diff --git a/django/db/migrations/executor.py.patch b/django/db/migrations/executor.py.patch
+new file mode 100644
+index 0000000000..ca2a92c0e0
+--- /dev/null
++++ b/django/db/migrations/executor.py.patch
+@@ -0,0 +1,30 @@
++--- a/django/db/migrations/executor.py
+++++ b/django/db/migrations/executor.py
++@@ -97,7 +97,6 @@ class MigrationExecutor:
++         Django first needs to create all project states before a migration is
++         (un)applied and in a second step run all the database operations.
++         """
++-        # The django_migrations table must be present to record applied
++-        # migrations.
++-        self.recorder.ensure_schema()
++ 
++         if plan is None:
++             plan = self.migration_plan(targets)
++@@ -105,6 +104,17 @@ class MigrationExecutor:
++         # Create the forwards plan Django would follow on an empty database
++         full_plan = self.migration_plan(self.loader.graph.leaf_nodes(), clean_start=True)
++ 
+++        # The django_migrations table must be present to record applied
+++        # migrations. Only create it if migrations are allowed on this database.
+++        if plan:
+++            # Check if migrations are allowed for any app in the plan
+++            from django.db import router
+++            apps_in_plan = {migration.app_label for migration, _ in plan}
+++            if any(router.allow_migrate(self.connection.alias, app) for app in apps_in_plan):
+++                self.recorder.ensure_schema()
+++        else:
+++            # If plan is empty, still ensure schema in case we need to read applied migrations
+++            self.recorder.ensure_schema()
+++
++         all_forwards = all(not backwards for mig, backwards in plan)
++         all_backwards = all(backwards for mig, backwards in plan)
+diff --git a/django/db/migrations/recorder.py b/django/db/migrations/recorder.py
+index 1a37c6b7d0..b5bf078502 100644
+--- a/django/db/migrations/recorder.py
++++ b/django/db/migrations/recorder.py
+@@ -1,5 +1,5 @@
+ from django.apps.registry import Apps
+-from django.db import DatabaseError, models
++from django.db import DatabaseError, models, router
+ from django.utils.functional import classproperty
+ from django.utils.timezone import now
+ 
+@@ -62,6 +62,19 @@ class MigrationRecorder:
+         # in the codebase.
+         if self.has_table():
+             return
++        # Check if migrations are allowed on this database by checking if
++        # any app allows migrations.
++        from django.apps import apps as django_apps
++        
++        allows_migrate = False
++        for app_config in django_apps.get_app_configs():
++            if router.allow_migrate(self.connection.alias, app_config.label):
++                allows_migrate = True
++                break
++        
++        if not allows_migrate:
++            return
++        
+         # Make the table
+         try:
+             with self.connection.schema_editor() as editor:
+@@ -84,12 +97,16 @@ class MigrationRecorder:
+     def record_applied(self, app, name):
+         """Record that a migration was applied."""
+         self.ensure_schema()
+-        self.migration_qs.create(app=app, name=name)
++        # Only record if the table exists (i.e., migrations are allowed on this database)
++        if self.has_table():
++            self.migration_qs.create(app=app, name=name)
+ 
+     def record_unapplied(self, app, name):
+         """Record that a migration was unapplied."""
+         self.ensure_schema()
+-        self.migration_qs.filter(app=app, name=name).delete()
++        # Only record if the table exists (i.e., migrations are allowed on this database)
++        if self.has_table():
++            self.migration_qs.filter(app=app, name=name).delete()
+ 
+     def flush(self):
+         """Delete all migration records. Useful for testing migrations."""
+diff --git a/fix_executor.py b/fix_executor.py
+new file mode 100644
+index 0000000000..55e0513323
+--- /dev/null
++++ b/fix_executor.py
+@@ -0,0 +1,14 @@
++import sys
++
++# Read the executor.py file
++with open('/testbed/django/db/migrations/executor.py', 'r') as f:
++    lines = f.readlines()
++
++# Find the line with "self.recorder.ensure_schema()"
++for i, line in enumerate(lines):
++    if 'self.recorder.ensure_schema()' in line:
++        print(f"Found ensure_schema at line {i+1}")
++        # Print surrounding lines for context
++        for j in range(max(0, i-5), min(len(lines), i+10)):
++            print(f"{j+1}: {lines[j]}", end='')
++        break

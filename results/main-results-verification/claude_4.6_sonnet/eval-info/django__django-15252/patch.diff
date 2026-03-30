@@ -1,0 +1,111 @@
+diff --git a/django/db/migrations/recorder.py b/django/db/migrations/recorder.py
+index 1a37c6b7d0..9a1972712d 100644
+--- a/django/db/migrations/recorder.py
++++ b/django/db/migrations/recorder.py
+@@ -1,5 +1,5 @@
+ from django.apps.registry import Apps
+-from django.db import DatabaseError, models
++from django.db import DatabaseError, models, router
+ from django.utils.functional import classproperty
+ from django.utils.timezone import now
+ 
+@@ -58,6 +58,10 @@ class MigrationRecorder:
+ 
+     def ensure_schema(self):
+         """Ensure the table exists and has the correct schema."""
++        # If the router says the model is not allowed for this db, don't create
++        # the table.
++        if not router.allow_migrate(self.connection.alias, self.Migration._meta.app_label):
++            return
+         # If the table's there, that's fine - we've never changed its schema
+         # in the codebase.
+         if self.has_table():
+diff --git a/test_migration_recorder_router.py b/test_migration_recorder_router.py
+new file mode 100644
+index 0000000000..739da4b105
+--- /dev/null
++++ b/test_migration_recorder_router.py
+@@ -0,0 +1,83 @@
++"""
++Test that MigrationRecorder respects db_router allow_migrate rules.
++"""
++import os
++import sys
++import django
++
++# Set up Django settings
++os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'test_settings')
++
++# Create test settings module
++import types
++settings_module = types.ModuleType('test_settings')
++settings_module.DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    },
++    'other': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    },
++}
++settings_module.INSTALLED_APPS = [
++    'django.contrib.contenttypes',
++    'django.contrib.auth',
++]
++settings_module.DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
++sys.modules['test_settings'] = settings_module
++
++django.setup()
++
++from django.db import connections
++from django.db.migrations.recorder import MigrationRecorder
++
++
++class TestRouter:
++    """Router that only allows migrations on 'default' db."""
++    def allow_migrate(self, db, app_label, **hints):
++        if db == 'default':
++            return True
++        return False
++
++
++# Test without router - should create table on 'other'
++print("Test 1: Without router, ensure_schema should create table on 'other'")
++other_connection = connections['other']
++recorder = MigrationRecorder(other_connection)
++recorder.ensure_schema()
++print(f"  Table exists on 'other': {recorder.has_table()}")
++assert recorder.has_table(), "Table should be created when no router"
++print("  PASSED")
++
++# Drop the table
++from django.db import models
++with other_connection.schema_editor() as editor:
++    editor.delete_model(recorder.Migration)
++print(f"  Table dropped, has_table: {recorder.has_table()}")
++
++# Test with router - should NOT create table on 'other'
++print("\nTest 2: With router that disallows 'other', ensure_schema should NOT create table on 'other'")
++from django.db import router as db_router
++
++# Add the test router
++from django.test.utils import override_settings
++with override_settings(DATABASE_ROUTERS=[TestRouter()]):
++    recorder2 = MigrationRecorder(other_connection)
++    recorder2.ensure_schema()
++    print(f"  Table exists on 'other': {recorder2.has_table()}")
++    assert not recorder2.has_table(), "Table should NOT be created when router disallows it"
++    print("  PASSED")
++
++# Test with router - should create table on 'default'
++print("\nTest 3: With router, ensure_schema should create table on 'default'")
++with override_settings(DATABASE_ROUTERS=[TestRouter()]):
++    default_connection = connections['default']
++    recorder3 = MigrationRecorder(default_connection)
++    recorder3.ensure_schema()
++    print(f"  Table exists on 'default': {recorder3.has_table()}")
++    assert recorder3.has_table(), "Table should be created on 'default'"
++    print("  PASSED")
++
++print("\nAll tests passed!")

@@ -1,0 +1,552 @@
+diff --git a/check_namedtuple.py b/check_namedtuple.py
+new file mode 100644
+index 0000000000..4bc1fec28c
+--- /dev/null
++++ b/check_namedtuple.py
+@@ -0,0 +1,21 @@
++"""Check how to detect named tuples"""
++from collections import namedtuple
++
++Range = namedtuple('Range', ['near', 'far'])
++regular_tuple = (1, 2)
++
++# Check if we can detect named tuples
++print(f"Range bases: {Range.__bases__}")
++print(f"tuple bases: {tuple.__bases__}")
++print(f"Range is subclass of tuple: {issubclass(Range, tuple)}")
++print(f"hasattr _fields: {hasattr(Range, '_fields')}")
++print(f"hasattr _fields on regular tuple: {hasattr(regular_tuple, '_fields')}")
++
++# Check if we can use _fields to detect named tuples
++print(f"\nRange._fields: {Range._fields}")
++print(f"regular_tuple._fields: {getattr(regular_tuple, '_fields', 'NOT FOUND')}")
++
++# Test creating instances
++r = Range(1, 2)
++print(f"\nRange instance: {r}")
++print(f"Range instance has _fields: {hasattr(r, '_fields')}")
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index 4648daf395..ff805adab8 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -1077,10 +1077,15 @@ class Query(BaseExpression):
+         elif isinstance(value, (list, tuple)):
+             # The items of the iterable may be expressions and therefore need
+             # to be resolved independently.
+-            return type(value)(
++            resolved = [
+                 self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
+                 for sub_value in value
+-            )
++            ]
++            # For named tuples, we need to unpack the list as positional arguments
++            if hasattr(value, '_fields'):
++                return type(value)(*resolved)
++            else:
++                return type(value)(resolved)
+         return value
+ 
+     def solve_lookup_type(self, lookup):
+diff --git a/fix_query.py b/fix_query.py
+new file mode 100644
+index 0000000000..8ad0f382d0
+--- /dev/null
++++ b/fix_query.py
+@@ -0,0 +1,39 @@
++"""Tool to fix the resolve_lookup_value method"""
++import sys
++
++def fix_resolve_lookup_value():
++    file_path = '/testbed/django/db/models/sql/query.py'
++    
++    with open(file_path, 'r') as f:
++        content = f.read()
++    
++    # Find and replace the problematic code
++    old_code = """        elif isinstance(value, (list, tuple)):
++            # The items of the iterable may be expressions and therefore need
++            # to be resolved independently.
++            return type(value)(
++                self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
++                for sub_value in value
++            )"""
++    
++    new_code = """        elif isinstance(value, (list, tuple)):
++            # The items of the iterable may be expressions and therefore need
++            # to be resolved independently.
++            return type(value)(*(
++                self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
++                for sub_value in value
++            ))"""
++    
++    if old_code in content:
++        content = content.replace(old_code, new_code)
++        with open(file_path, 'w') as f:
++            f.write(content)
++        print("Fix applied successfully!")
++        return True
++    else:
++        print("Could not find the code to fix")
++        return False
++
++if __name__ == '__main__':
++    success = fix_resolve_lookup_value()
++    sys.exit(0 if success else 1)
+diff --git a/fix_query_v2.py b/fix_query_v2.py
+new file mode 100644
+index 0000000000..0b81dee90e
+--- /dev/null
++++ b/fix_query_v2.py
+@@ -0,0 +1,44 @@
++"""Tool to fix the resolve_lookup_value method - version 2"""
++import sys
++
++def fix_resolve_lookup_value():
++    file_path = '/testbed/django/db/models/sql/query.py'
++    
++    with open(file_path, 'r') as f:
++        content = f.read()
++    
++    # Find and replace the problematic code with a better solution
++    old_code = """        elif isinstance(value, (list, tuple)):
++            # The items of the iterable may be expressions and therefore need
++            # to be resolved independently.
++            return type(value)(*(
++                self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
++                for sub_value in value
++            ))"""
++    
++    new_code = """        elif isinstance(value, (list, tuple)):
++            # The items of the iterable may be expressions and therefore need
++            # to be resolved independently.
++            resolved = [
++                self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
++                for sub_value in value
++            ]
++            # For named tuples, we need to unpack the list as positional arguments
++            if hasattr(value, '_fields'):
++                return type(value)(*resolved)
++            else:
++                return type(value)(resolved)"""
++    
++    if old_code in content:
++        content = content.replace(old_code, new_code)
++        with open(file_path, 'w') as f:
++            f.write(content)
++        print("Fix applied successfully!")
++        return True
++    else:
++        print("Could not find the code to fix")
++        return False
++
++if __name__ == '__main__':
++    success = fix_resolve_lookup_value()
++    sys.exit(0 if success else 1)
+diff --git a/test_comprehensive.py b/test_comprehensive.py
+new file mode 100644
+index 0000000000..593050261b
+--- /dev/null
++++ b/test_comprehensive.py
+@@ -0,0 +1,100 @@
++"""Comprehensive test for the resolve_lookup_value fix"""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++    django.setup()
++
++from collections import namedtuple
++from django.db.models.sql.query import Query
++from django.db import models
++
++# Create a simple named tuple
++Range = namedtuple('Range', ['near', 'far'])
++
++# Create a simple model for testing
++class TestModel(models.Model):
++    value = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test'
++
++def test_namedtuple():
++    """Test with named tuple"""
++    query = Query(TestModel)
++    range_tuple = Range(near=1, far=10)
++    
++    result = query.resolve_lookup_value(range_tuple, can_reuse=None, allow_joins=True)
++    assert isinstance(result, Range), f"Expected Range, got {type(result)}"
++    assert result.near == 1, f"Expected near=1, got {result.near}"
++    assert result.far == 10, f"Expected far=10, got {result.far}"
++    print("[PASS] Named tuple test passed")
++
++def test_regular_tuple():
++    """Test with regular tuple"""
++    query = Query(TestModel)
++    regular_tuple = (1, 10)
++    
++    result = query.resolve_lookup_value(regular_tuple, can_reuse=None, allow_joins=True)
++    assert isinstance(result, tuple), f"Expected tuple, got {type(result)}"
++    assert result == (1, 10), f"Expected (1, 10), got {result}"
++    print("[PASS] Regular tuple test passed")
++
++def test_list():
++    """Test with list"""
++    query = Query(TestModel)
++    test_list = [1, 10]
++    
++    result = query.resolve_lookup_value(test_list, can_reuse=None, allow_joins=True)
++    assert isinstance(result, list), f"Expected list, got {type(result)}"
++    assert result == [1, 10], f"Expected [1, 10], got {result}"
++    print("[PASS] List test passed")
++
++def test_nested_namedtuple():
++    """Test with nested named tuple"""
++    query = Query(TestModel)
++    Point = namedtuple('Point', ['x', 'y'])
++    nested = (Point(1, 2), Point(3, 4))
++    
++    result = query.resolve_lookup_value(nested, can_reuse=None, allow_joins=True)
++    assert isinstance(result, tuple), f"Expected tuple, got {type(result)}"
++    assert len(result) == 2, f"Expected 2 items, got {len(result)}"
++    assert isinstance(result[0], Point), f"Expected Point, got {type(result[0])}"
++    assert result[0].x == 1, f"Expected x=1, got {result[0].x}"
++    print("[PASS] Nested named tuple test passed")
++
++def test_scalar_value():
++    """Test with scalar value"""
++    query = Query(TestModel)
++    
++    result = query.resolve_lookup_value(42, can_reuse=None, allow_joins=True)
++    assert result == 42, f"Expected 42, got {result}"
++    print("[PASS] Scalar value test passed")
++
++if __name__ == '__main__':
++    try:
++        test_namedtuple()
++        test_regular_tuple()
++        test_list()
++        test_nested_namedtuple()
++        test_scalar_value()
++        print("\n[SUCCESS] All tests passed!")
++    except AssertionError as e:
++        print(f"\n[FAILED] Test failed: {e}")
++        exit(1)
+diff --git a/test_final_comprehensive.py b/test_final_comprehensive.py
+new file mode 100644
+index 0000000000..3b035422cf
+--- /dev/null
++++ b/test_final_comprehensive.py
+@@ -0,0 +1,125 @@
++"""Final comprehensive test for the resolve_lookup_value fix"""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++    django.setup()
++
++from collections import namedtuple
++from django.db.models.sql.query import Query
++from django.db import models
++
++# Create various named tuples
++Range = namedtuple('Range', ['start', 'end'])
++Point = namedtuple('Point', ['x', 'y'])
++Color = namedtuple('Color', ['r', 'g', 'b'])
++
++# Create a simple model for testing
++class TestModel(models.Model):
++    value = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test'
++
++def test_simple_namedtuple():
++    query = Query(TestModel)
++    range_tuple = Range(start=1, end=10)
++    result = query.resolve_lookup_value(range_tuple, can_reuse=None, allow_joins=True)
++    assert isinstance(result, Range) and result.start == 1 and result.end == 10
++    print("[PASS] Simple named tuple")
++
++def test_namedtuple_with_none():
++    query = Query(TestModel)
++    range_tuple = Range(start=None, end=10)
++    result = query.resolve_lookup_value(range_tuple, can_reuse=None, allow_joins=True)
++    assert isinstance(result, Range) and result.start is None and result.end == 10
++    print("[PASS] Named tuple with None")
++
++def test_namedtuple_with_strings():
++    query = Query(TestModel)
++    color = Color(r='255', g='128', b='0')
++    result = query.resolve_lookup_value(color, can_reuse=None, allow_joins=True)
++    assert isinstance(result, Color) and result.r == '255'
++    print("[PASS] Named tuple with strings")
++
++def test_regular_tuple():
++    query = Query(TestModel)
++    regular_tuple = (1, 10)
++    result = query.resolve_lookup_value(regular_tuple, can_reuse=None, allow_joins=True)
++    assert isinstance(result, tuple) and result == (1, 10)
++    print("[PASS] Regular tuple")
++
++def test_list():
++    query = Query(TestModel)
++    test_list = [1, 10]
++    result = query.resolve_lookup_value(test_list, can_reuse=None, allow_joins=True)
++    assert isinstance(result, list) and result == [1, 10]
++    print("[PASS] List")
++
++def test_nested_namedtuples():
++    query = Query(TestModel)
++    nested = (Point(1, 2), Point(3, 4))
++    result = query.resolve_lookup_value(nested, can_reuse=None, allow_joins=True)
++    assert isinstance(result, tuple) and len(result) == 2
++    print("[PASS] Nested named tuples")
++
++def test_empty_namedtuple():
++    Empty = namedtuple('Empty', [])
++    query = Query(TestModel)
++    empty = Empty()
++    result = query.resolve_lookup_value(empty, can_reuse=None, allow_joins=True)
++    assert isinstance(result, Empty)
++    print("[PASS] Empty named tuple")
++
++def test_single_element_namedtuple():
++    Single = namedtuple('Single', ['value'])
++    query = Query(TestModel)
++    single = Single(value=42)
++    result = query.resolve_lookup_value(single, can_reuse=None, allow_joins=True)
++    assert isinstance(result, Single) and result.value == 42
++    print("[PASS] Single element named tuple")
++
++def test_scalar_value():
++    query = Query(TestModel)
++    result = query.resolve_lookup_value(42, can_reuse=None, allow_joins=True)
++    assert result == 42
++    print("[PASS] Scalar value")
++
++def test_string_value():
++    query = Query(TestModel)
++    result = query.resolve_lookup_value("test", can_reuse=None, allow_joins=True)
++    assert result == "test"
++    print("[PASS] String value")
++
++if __name__ == '__main__':
++    try:
++        test_simple_namedtuple()
++        test_namedtuple_with_none()
++        test_namedtuple_with_strings()
++        test_regular_tuple()
++        test_list()
++        test_nested_namedtuples()
++        test_empty_namedtuple()
++        test_single_element_namedtuple()
++        test_scalar_value()
++        test_string_value()
++        print("\n[SUCCESS] All comprehensive tests passed!")
++    except AssertionError as e:
++        print(f"\n[FAILED] Test failed: {e}")
++        exit(1)
+diff --git a/test_namedtuple_issue.py b/test_namedtuple_issue.py
+new file mode 100644
+index 0000000000..8a4a0ce360
+--- /dev/null
++++ b/test_namedtuple_issue.py
+@@ -0,0 +1,64 @@
++"""Test script to reproduce the named tuple issue in resolve_lookup_value"""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++    django.setup()
++
++from collections import namedtuple
++from django.db.models.sql.query import Query
++from django.db import models
++
++# Create a simple named tuple
++Range = namedtuple('Range', ['near', 'far'])
++
++# Create a simple model for testing
++class TestModel(models.Model):
++    value = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test'
++
++# Test the issue
++def test_namedtuple_resolve():
++    query = Query(TestModel)
++    
++    # Create a named tuple instance
++    range_tuple = Range(near=1, far=10)
++    
++    try:
++        # This should fail with the current code
++        result = query.resolve_lookup_value(range_tuple, can_reuse=None, allow_joins=True)
++        print(f"Success! Result: {result}")
++        print(f"Result type: {type(result)}")
++        assert isinstance(result, Range), f"Expected Range, got {type(result)}"
++        assert result.near == 1, f"Expected near=1, got {result.near}"
++        assert result.far == 10, f"Expected far=10, got {result.far}"
++    except TypeError as e:
++        print(f"Error: {e}")
++        return False
++    
++    return True
++
++if __name__ == '__main__':
++    success = test_namedtuple_resolve()
++    if success:
++        print("Test passed!")
++    else:
++        print("Test failed!")
+diff --git a/test_namedtuple_range.py b/test_namedtuple_range.py
+new file mode 100644
+index 0000000000..3c72432d90
+--- /dev/null
++++ b/test_namedtuple_range.py
+@@ -0,0 +1,95 @@
++"""Test named tuples with range filters - the actual use case from the PR"""
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++        SECRET_KEY='test-secret-key',
++    )
++    django.setup()
++
++from collections import namedtuple
++from django.db import models
++
++# Create a simple named tuple for range
++Range = namedtuple('Range', ['start', 'end'])
++
++# Create a simple model for testing
++class TestModel(models.Model):
++    value = models.IntegerField()
++    
++    class Meta:
++        app_label = 'test'
++
++def test_namedtuple_range_filter():
++    """Test using named tuple with __range filter"""
++    # Create a named tuple instance
++    range_tuple = Range(start=1, end=10)
++    
++    try:
++        # This should work now - building a query with a named tuple range
++        query = TestModel.objects.filter(value__range=range_tuple)
++        # Just check that the query can be built without error
++        str(query.query)
++        print("[PASS] Named tuple range filter query built successfully")
++        return True
++    except TypeError as e:
++        print(f"[FAIL] Error building query with named tuple range: {e}")
++        return False
++
++def test_regular_tuple_range_filter():
++    """Test using regular tuple with __range filter"""
++    # Create a regular tuple instance
++    range_tuple = (1, 10)
++    
++    try:
++        # This should work - building a query with a regular tuple range
++        query = TestModel.objects.filter(value__range=range_tuple)
++        # Just check that the query can be built without error
++        str(query.query)
++        print("[PASS] Regular tuple range filter query built successfully")
++        return True
++    except TypeError as e:
++        print(f"[FAIL] Error building query with regular tuple range: {e}")
++        return False
++
++def test_list_range_filter():
++    """Test using list with __range filter"""
++    # Create a list instance
++    range_list = [1, 10]
++    
++    try:
++        # This should work - building a query with a list range
++        query = TestModel.objects.filter(value__range=range_list)
++        # Just check that the query can be built without error
++        str(query.query)
++        print("[PASS] List range filter query built successfully")
++        return True
++    except TypeError as e:
++        print(f"[FAIL] Error building query with list range: {e}")
++        return False
++
++if __name__ == '__main__':
++    all_pass = True
++    all_pass = test_namedtuple_range_filter() and all_pass
++    all_pass = test_regular_tuple_range_filter() and all_pass
++    all_pass = test_list_range_filter() and all_pass
++    
++    if all_pass:
++        print("\n[SUCCESS] All range filter tests passed!")
++    else:
++        print("\n[FAILED] Some tests failed!")
++        exit(1)

@@ -1,0 +1,198 @@
+diff --git a/apply_fix.py b/apply_fix.py
+new file mode 100644
+index 0000000000..19417da95e
+--- /dev/null
++++ b/apply_fix.py
+@@ -0,0 +1,32 @@
++import re
++
++file_path = 'django/db/models/fields/related_descriptors.py'
++with open(file_path, 'r') as f:
++    lines = f.readlines()
++
++# 1. Add sync_to_async import
++if 'from asgiref.sync import sync_to_async\n' not in lines:
++    for i, line in enumerate(lines):
++        if 'from django.core.exceptions import FieldError' in line:
++            lines.insert(i, 'from asgiref.sync import sync_to_async\n')
++            break
++
++# 2. Fix create_reverse_many_to_one_manager
++# Find the end of update_or_create at line 811
++for i, line in enumerate(lines):
++    if 'update_or_create.alters_data = True' in line and i < 900: # Ensure we are in the right manager
++        # Check if we already added it
++        if 'async def acreate' not in lines[i+1]:
++            lines.insert(i+1, '\n        async def acreate(self, **kwargs):\n            return await sync_to_async(self.create)(**kwargs)\n\n        acreate.alters_data = True\n\n        async def aget_or_create(self, **kwargs):\n            return await sync_to_async(self.get_or_create)(**kwargs)\n\n        aget_or_create.alters_data = True\n\n        async def aupdate_or_create(self, **kwargs):\n            return await sync_to_async(self.update_or_create)(**kwargs)\n\n        aupdate_or_create.alters_data = True\n')
++        break
++
++# 3. Fix create_forward_many_to_many_manager
++# Find the end of update_or_create for ManyRelatedManager
++for i, line in enumerate(lines):
++    if 'update_or_create.alters_data = True' in line and i > 1000:
++        if 'async def acreate' not in lines[i+1]:
++            lines.insert(i+1, '\n        async def acreate(self, *, through_defaults=None, **kwargs):\n            return await sync_to_async(self.create)(\n                through_defaults=through_defaults, **kwargs\n            )\n\n        acreate.alters_data = True\n\n        async def aget_or_create(self, *, through_defaults=None, **kwargs):\n            return await sync_to_async(self.get_or_create)(\n                through_defaults=through_defaults, **kwargs\n            )\n\n        aget_or_create.alters_data = True\n\n        async def aupdate_or_create(self, *, through_defaults=None, **kwargs):\n            return await sync_to_async(self.update_or_create)(\n                through_defaults=through_defaults, **kwargs\n            )\n\n        aupdate_or_create.alters_data = True\n')
++        break
++
++with open(file_path, 'w') as f:
++    f.writelines(lines)
+diff --git a/django/db/models/fields/related_descriptors.py b/django/db/models/fields/related_descriptors.py
+index c5d87f647a..76ec06487c 100644
+--- a/django/db/models/fields/related_descriptors.py
++++ b/django/db/models/fields/related_descriptors.py
+@@ -63,6 +63,7 @@ and two directions (forward and reverse) for a total of six combinations.
+    ``ReverseManyToManyDescriptor``, use ``ManyToManyDescriptor`` instead.
+ """
+ 
++from asgiref.sync import sync_to_async
+ from django.core.exceptions import FieldError
+ from django.db import (
+     DEFAULT_DB_ALIAS,
+@@ -809,6 +810,21 @@ def create_reverse_many_to_one_manager(superclass, rel):
+ 
+         update_or_create.alters_data = True
+ 
++        async def acreate(self, **kwargs):
++            return await sync_to_async(self.create)(**kwargs)
++
++        acreate.alters_data = True
++
++        async def aget_or_create(self, **kwargs):
++            return await sync_to_async(self.get_or_create)(**kwargs)
++
++        aget_or_create.alters_data = True
++
++        async def aupdate_or_create(self, **kwargs):
++            return await sync_to_async(self.update_or_create)(**kwargs)
++
++        aupdate_or_create.alters_data = True
++
+         # remove() and clear() are only provided if the ForeignKey can have a
+         # value of null.
+         if rel.field.null:
+@@ -1217,6 +1233,27 @@ def create_forward_many_to_many_manager(superclass, rel, reverse):
+ 
+         update_or_create.alters_data = True
+ 
++        async def acreate(self, *, through_defaults=None, **kwargs):
++            return await sync_to_async(self.create)(
++                through_defaults=through_defaults, **kwargs
++            )
++
++        acreate.alters_data = True
++
++        async def aget_or_create(self, *, through_defaults=None, **kwargs):
++            return await sync_to_async(self.get_or_create)(
++                through_defaults=through_defaults, **kwargs
++            )
++
++        aget_or_create.alters_data = True
++
++        async def aupdate_or_create(self, *, through_defaults=None, **kwargs):
++            return await sync_to_async(self.update_or_create)(
++                through_defaults=through_defaults, **kwargs
++            )
++
++        aupdate_or_create.alters_data = True
++
+         def _get_target_ids(self, target_field_name, objs):
+             """
+             Return the set of ids of `objs` that the target field references.
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..65b97287e7
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,92 @@
++import os
++import django
++from django.conf import settings
++import asyncio
++from django.apps import AppConfig
++from asgiref.sync import sync_to_async
++
++class ReproduceAppConfig(AppConfig):
++    name = 'reproduce_issue'
++    path = os.path.dirname(os.path.abspath(__file__))
++
++if not settings.configured:
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=['reproduce_issue.ReproduceAppConfig'],
++    )
++    # Create a dummy module for the app
++    import sys
++    from types import ModuleType
++    app_module = ModuleType('reproduce_issue')
++    sys.modules['reproduce_issue'] = app_module
++    app_module.ReproduceAppConfig = ReproduceAppConfig
++    
++    django.setup()
++
++from django.db import models
++
++# Define models
++class Reporter(models.Model):
++    first_name = models.CharField(max_length=30)
++    class Meta:
++        app_label = 'reproduce_issue'
++
++class Article(models.Model):
++    headline = models.CharField(max_length=100)
++    reporter = models.ForeignKey(Reporter, on_delete=models.CASCADE, related_name='articles')
++    class Meta:
++        app_label = 'reproduce_issue'
++
++class Publication(models.Model):
++    title = models.CharField(max_length=30)
++    articles = models.ManyToManyField(Article, related_name='publications')
++    class Meta:
++        app_label = 'reproduce_issue'
++
++def setup_db():
++    from django.db import connection
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(Reporter)
++        schema_editor.create_model(Article)
++        schema_editor.create_model(Publication)
++
++async def run_test():
++    await sync_to_async(setup_db)()
++
++    r = await Reporter.objects.acreate(first_name="John")
++    
++    # Test ReverseManyToOneDescriptor (Reporter.articles)
++    print("Testing ReverseManyToOneDescriptor.acreate...")
++    try:
++        # This should fail to set reporter_id if it's using QuerySet.acreate instead of RelatedManager.acreate
++        a = await r.articles.acreate(headline="Django News")
++        print(f"acreate success: {a.headline}, reporter_id: {a.reporter_id}")
++        if a.reporter_id != r.id:
++            print(f"FAILURE: acreate did not set the foreign key correctly. Expected {r.id}, got {a.reporter_id}")
++        else:
++            print("SUCCESS: ReverseManyToOneDescriptor.acreate set the foreign key correctly")
++    except Exception as e:
++        print(f"acreate failed: {e}")
++
++    # Test ManyToManyDescriptor (Article.publications)
++    print("\nTesting ManyToManyDescriptor.acreate...")
++    art = await Article.objects.acreate(headline="More News", reporter=r)
++    try:
++        p = await art.publications.acreate(title="The Times")
++        print(f"ManyToMany acreate success: {p.title}")
++        # Check if the relationship is actually created
++        exists = await art.publications.filter(id=p.id).aexists()
++        if not exists:
++            print("FAILURE: ManyToMany acreate did not create the relationship")
++        else:
++            print("SUCCESS: ManyToManyDescriptor.acreate created the relationship")
++    except Exception as e:
++        print(f"ManyToMany acreate failed: {e}")
++
++if __name__ == "__main__":
++    asyncio.run(run_test())

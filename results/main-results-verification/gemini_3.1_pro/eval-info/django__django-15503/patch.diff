@@ -1,0 +1,128 @@
+diff --git a/django/db/models/fields/json.py b/django/db/models/fields/json.py
+index fdca700c9d..75c6f3aa74 100644
+--- a/django/db/models/fields/json.py
++++ b/django/db/models/fields/json.py
+@@ -191,15 +191,21 @@ class HasKeyLookup(PostgresOperatorLookup):
+         for key in rhs:
+             if isinstance(key, KeyTransform):
+                 *_, rhs_key_transforms = key.preprocess_lhs(compiler, connection)
++                rhs_params.append(
++                    "%s%s"
++                    % (
++                        lhs_json_path,
++                        compile_json_path(rhs_key_transforms, include_root=False),
++                    )
++                )
+             else:
+-                rhs_key_transforms = [key]
+-            rhs_params.append(
+-                "%s%s"
+-                % (
+-                    lhs_json_path,
+-                    compile_json_path(rhs_key_transforms, include_root=False),
++                rhs_params.append(
++                    "%s%s"
++                    % (
++                        lhs_json_path,
++                        compile_json_path([key], include_root=False) if isinstance(key, int) else ".%s" % json.dumps(key)
++                    )
+                 )
+-            )
+         # Add condition for each key.
+         if self.logical_operator:
+             sql = "(%s)" % self.logical_operator.join([sql] * len(rhs_params))
+diff --git a/patch.py b/patch.py
+new file mode 100644
+index 0000000000..3bd75bb46e
+--- /dev/null
++++ b/patch.py
+@@ -0,0 +1,39 @@
++import re
++
++with open("django/db/models/fields/json.py", "r") as f:
++    content = f.read()
++
++# Let's replace the rhs_params.append part
++replacement = """            if isinstance(key, KeyTransform):
++                *_, rhs_key_transforms = key.preprocess_lhs(compiler, connection)
++                rhs_params.append(
++                    "%s%s"
++                    % (
++                        lhs_json_path,
++                        compile_json_path(rhs_key_transforms, include_root=False),
++                    )
++                )
++            else:
++                rhs_params.append(
++                    "%s%s"
++                    % (
++                        lhs_json_path,
++                        compile_json_path([key], include_root=False) if isinstance(key, int) else ".%s" % json.dumps(key)
++                    )
++                )"""
++
++old_code = """            if isinstance(key, KeyTransform):
++                *_, rhs_key_transforms = key.preprocess_lhs(compiler, connection)
++            else:
++                rhs_key_transforms = [key]
++            rhs_params.append(
++                "%s%s"
++                % (
++                    lhs_json_path,
++                    compile_json_path(rhs_key_transforms, include_root=False),
++                )
++            )"""
++
++content = content.replace(old_code, replacement)
++with open("django/db/models/fields/json.py", "w") as f:
++    f.write(content)
+diff --git a/repro.py b/repro.py
+new file mode 100644
+index 0000000000..cb3d7438b0
+--- /dev/null
++++ b/repro.py
+@@ -0,0 +1,44 @@
++import os
++import django
++from django.conf import settings
++from django.db import models, connection
++
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[],
++)
++
++django.setup()
++
++class JsonFieldHasKeyTest(models.Model):
++    data = models.JSONField()
++    class Meta:
++        app_label = 'repro'
++
++def main():
++    with connection.schema_editor() as schema_editor:
++        schema_editor.create_model(JsonFieldHasKeyTest)
++    
++    test = JsonFieldHasKeyTest(data={'foo': 'bar'})
++    test2 = JsonFieldHasKeyTest(data={'1111': 'bar'})
++    test.save()
++    test2.save()
++    
++    c1 = JsonFieldHasKeyTest.objects.filter(data__has_key='foo').count()
++    c2 = JsonFieldHasKeyTest.objects.filter(data__has_key='1111').count()
++    
++    print(f"c1 (foo): {c1}")
++    print(f"c2 (1111): {c2}")
++    
++    if c2 != 1:
++        print("FAIL!")
++    else:
++        print("SUCCESS!")
++
++if __name__ == '__main__':
++    main()

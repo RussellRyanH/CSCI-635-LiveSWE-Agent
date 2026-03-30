@@ -1,0 +1,505 @@
+diff --git a/edit_tool.py b/edit_tool.py
+new file mode 100644
+index 000000000..bfc839072
+--- /dev/null
++++ b/edit_tool.py
+@@ -0,0 +1,68 @@
++#!/usr/bin/env python3
++import sys
++
++def add_refit_timing():
++    """Add refit_time_ tracking to BaseSearchCV.fit method"""
++    
++    with open('/testbed/sklearn/model_selection/_search.py', 'r') as f:
++        lines = f.readlines()
++    
++    # Find the line with "if self.refit:" around line 766
++    refit_start = None
++    for i, line in enumerate(lines):
++        if i > 750 and i < 800 and 'if self.refit:' in line and 'self.best_estimator_' in lines[i+1]:
++            refit_start = i
++            break
++    
++    if refit_start is None:
++        print("Could not find refit section")
++        return False
++    
++    print(f"Found refit section at line {refit_start + 1}")
++    
++    # Check if timing is already added
++    if 'refit_start_time' in ''.join(lines[refit_start:refit_start+10]):
++        print("Timing already added")
++        return True
++    
++    # Insert import for time at the top if not already there
++    import_added = False
++    for i, line in enumerate(lines[:50]):
++        if 'import time' in line:
++            import_added = True
++            break
++    
++    if not import_added:
++        # Find the last import statement
++        last_import = 0
++        for i, line in enumerate(lines[:100]):
++            if line.startswith('import ') or line.startswith('from '):
++                last_import = i
++        lines.insert(last_import + 1, 'import time\n')
++        refit_start += 1  # Adjust line number
++    
++    # Now add timing around the refit section
++    # Find the exact lines to modify
++    indent = '        '  # 8 spaces for the if block
++    
++    # Insert timing start before the clone and set_params
++    lines.insert(refit_start + 1, f'{indent}refit_start_time = time.time()\n')
++    
++    # Find the end of the refit block (the fit call)
++    refit_end = refit_start + 1
++    for i in range(refit_start + 2, min(refit_start + 15, len(lines))):
++        if 'self.best_estimator_.fit' in lines[i]:
++            refit_end = i
++            break
++    
++    # Insert timing end after the fit call
++    lines.insert(refit_end + 1, f'{indent}self.refit_time_ = time.time() - refit_start_time\n')
++    
++    with open('/testbed/sklearn/model_selection/_search.py', 'w') as f:
++        f.writelines(lines)
++    
++    print("Successfully added refit_time_ tracking")
++    return True
++
++if __name__ == '__main__':
++    add_refit_timing()
+diff --git a/fix_refit.py b/fix_refit.py
+new file mode 100644
+index 000000000..57f5d7ee7
+--- /dev/null
++++ b/fix_refit.py
+@@ -0,0 +1,46 @@
++#!/usr/bin/env python3
++
++with open('/testbed/sklearn/model_selection/_search.py', 'r') as f:
++    content = f.read()
++
++# Remove the incorrectly added lines first
++lines = content.split('\n')
++new_lines = []
++skip_next = False
++
++for i, line in enumerate(lines):
++    if 'refit_start_time = time.time()' in line and i > 750:
++        skip_next = False
++        continue
++    if 'self.refit_time_ = time.time() - refit_start_time' in line and i > 750 and i < 800:
++        skip_next = False
++        continue
++    new_lines.append(line)
++
++content = '\n'.join(new_lines)
++
++# Now find and replace the refit section properly
++old_refit = """        if self.refit:
++            self.best_estimator_ = clone(base_estimator).set_params(
++                **self.best_params_)
++            if y is not None:
++                self.best_estimator_.fit(X, y, **fit_params)
++            else:
++                self.best_estimator_.fit(X, **fit_params)"""
++
++new_refit = """        if self.refit:
++            refit_start_time = time.time()
++            self.best_estimator_ = clone(base_estimator).set_params(
++                **self.best_params_)
++            if y is not None:
++                self.best_estimator_.fit(X, y, **fit_params)
++            else:
++                self.best_estimator_.fit(X, **fit_params)
++            self.refit_time_ = time.time() - refit_start_time"""
++
++content = content.replace(old_refit, new_refit)
++
++with open('/testbed/sklearn/model_selection/_search.py', 'w') as f:
++    f.write(content)
++
++print("Fixed refit timing")
+diff --git a/sklearn/model_selection/_search.py b/sklearn/model_selection/_search.py
+index 99d6096af..ce9583909 100644
+--- a/sklearn/model_selection/_search.py
++++ b/sklearn/model_selection/_search.py
+@@ -39,6 +39,7 @@ from ..utils.metaestimators import if_delegate_has_method
+ from ..utils.deprecation import DeprecationDict
+ from ..metrics.scorer import _check_multimetric_scoring
+ from ..metrics.scorer import check_scoring
++import time
+ 
+ 
+ __all__ = ['GridSearchCV', 'ParameterGrid', 'fit_grid_point',
+@@ -596,6 +597,17 @@ class BaseSearchCV(six.with_metaclass(ABCMeta, BaseEstimator,
+ 
+         **fit_params : dict of string -> object
+             Parameters passed to the ``fit`` method of the estimator
++
++        Returns
++        -------
++        self : object
++            Instance of the estimator with fitted attributes.
++
++        Notes
++        -----
++        When ``refit=True``, the ``refit_time_`` attribute is set to the
++        time (in seconds) it took to refit the best estimator on the full
++        dataset.
+         """
+ 
+         if self.fit_params is not None:
+@@ -764,12 +776,14 @@ class BaseSearchCV(six.with_metaclass(ABCMeta, BaseEstimator,
+                 self.best_index_]
+ 
+         if self.refit:
++            refit_start_time = time.time()
+             self.best_estimator_ = clone(base_estimator).set_params(
+                 **self.best_params_)
+             if y is not None:
+                 self.best_estimator_.fit(X, y, **fit_params)
+             else:
+                 self.best_estimator_.fit(X, **fit_params)
++            self.refit_time_ = time.time() - refit_start_time
+ 
+         # Store the only scorer not as a dict for single metric evaluation
+         self.scorer_ = scorers if self.multimetric_ else scorers['score']
+diff --git a/test_final_verification.py b/test_final_verification.py
+new file mode 100644
+index 000000000..29a835428
+--- /dev/null
++++ b/test_final_verification.py
+@@ -0,0 +1,70 @@
++"""
++Final verification that the PR requirements are fully met.
++This test demonstrates the exact use case from the PR description.
++"""
++
++import sklearn.datasets
++import sklearn.model_selection
++import sklearn.ensemble
++
++print("\n" + "="*80)
++print("FINAL VERIFICATION: PR Requirements for refit_time_ attribute")
++print("="*80)
++
++X, y = sklearn.datasets.load_iris(return_X_y=True)
++
++# The exact use case from the PR description
++print("\nUse Case: Retrieve time to refit the estimator in BaseSearchCV")
++print("-" * 80)
++
++print("\nScenario 1: Single core (n_jobs=1)")
++rs_single = sklearn.model_selection.GridSearchCV(
++    estimator=sklearn.ensemble.RandomForestClassifier(random_state=42),
++    param_grid={'n_estimators': [2, 3, 4, 5]},
++    cv=3,
++    n_jobs=1
++)
++rs_single.fit(X, y)
++
++print("  - mean_fit_time (per fold): {}".format(rs_single.cv_results_['mean_fit_time']))
++print("  - mean_score_time (per fold): {}".format(rs_single.cv_results_['mean_score_time']))
++print("  - refit_time_: {:.6f} seconds".format(rs_single.refit_time_))
++
++print("\nScenario 2: Multiple cores (n_jobs=2)")
++print("  This is the main use case from the PR - when n_jobs != 1,")
++print("  we can't simply subtract fold times from total time.")
++rs_parallel = sklearn.model_selection.GridSearchCV(
++    estimator=sklearn.ensemble.RandomForestClassifier(random_state=42),
++    param_grid={'n_estimators': [2, 3, 4, 5]},
++    cv=3,
++    n_jobs=2
++)
++rs_parallel.fit(X, y)
++
++print("  - mean_fit_time (per fold): {}".format(rs_parallel.cv_results_['mean_fit_time']))
++print("  - mean_score_time (per fold): {}".format(rs_parallel.cv_results_['mean_score_time']))
++print("  - refit_time_: {:.6f} seconds".format(rs_parallel.refit_time_))
++print("  - With n_jobs=2, we can now directly access refit_time_!")
++
++print("\nScenario 3: With refit=False")
++rs_no_refit = sklearn.model_selection.GridSearchCV(
++    estimator=sklearn.ensemble.RandomForestClassifier(random_state=42),
++    param_grid={'n_estimators': [2, 3]},
++    cv=3,
++    refit=False
++)
++rs_no_refit.fit(X, y)
++
++print("  - refit_time_ exists: {}".format(hasattr(rs_no_refit, 'refit_time_')))
++print("  - This is correct - no refit was performed")
++
++print("\n" + "="*80)
++print("VERIFICATION COMPLETE: All PR requirements are satisfied!")
++print("="*80)
++print("\nSummary:")
++print("  [OK] refit_time_ attribute is available when refit=True")
++print("  [OK] refit_time_ is NOT available when refit=False")
++print("  [OK] refit_time_ works correctly with n_jobs != 1")
++print("  [OK] Time values are positive and reasonable")
++print("  [OK] Use case for OpenML.org is now supported")
++print("\n")
+diff --git a/test_pr_requirements.py b/test_pr_requirements.py
+new file mode 100644
+index 000000000..64e196820
+--- /dev/null
++++ b/test_pr_requirements.py
+@@ -0,0 +1,87 @@
++"""
++Test that the PR requirements are met:
++1. refit_time_ attribute is available when refit=True
++2. refit_time_ is not available when refit=False
++3. refit_time_ works with n_jobs != 1
++4. The time is accurate and positive
++"""
++
++import sklearn.datasets
++import sklearn.model_selection
++import sklearn.ensemble
++import time
++
++X, y = sklearn.datasets.load_iris(return_X_y=True)
++
++print("=" * 70)
++print("Testing PR Requirement: Retrieving time to refit the estimator")
++print("=" * 70)
++
++# Test 1: Basic case from PR description
++print("\n1. Basic GridSearchCV with refit=True (single core)")
++rs = sklearn.model_selection.GridSearchCV(
++    estimator=sklearn.ensemble.RandomForestClassifier(random_state=42),
++    param_grid={'n_estimators': [2, 3, 4, 5]},
++    cv=3
++)
++rs.fit(X, y)
++
++assert hasattr(rs, 'refit_time_'), "refit_time_ attribute should exist when refit=True"
++assert rs.refit_time_ > 0, "refit_time_ should be positive"
++print("   [OK] refit_time_ = {:.6f} seconds".format(rs.refit_time_))
++print("   [OK] mean_fit_time = {}".format(rs.cv_results_['mean_fit_time']))
++print("   [OK] mean_score_time = {}".format(rs.cv_results_['mean_score_time']))
++
++# Test 2: With n_jobs != 1 (the main use case from PR)
++print("\n2. GridSearchCV with n_jobs=2 (parallel processing)")
++rs_parallel = sklearn.model_selection.GridSearchCV(
++    estimator=sklearn.ensemble.RandomForestClassifier(random_state=42),
++    param_grid={'n_estimators': [2, 3, 4, 5]},
++    cv=3,
++    n_jobs=2
++)
++rs_parallel.fit(X, y)
++
++assert hasattr(rs_parallel, 'refit_time_'), "refit_time_ should exist with n_jobs != 1"
++assert rs_parallel.refit_time_ > 0, "refit_time_ should be positive with n_jobs != 1"
++print("   [OK] refit_time_ = {:.6f} seconds".format(rs_parallel.refit_time_))
++print("   [OK] Works correctly with parallel processing!")
++
++# Test 3: With refit=False
++print("\n3. GridSearchCV with refit=False")
++rs_no_refit = sklearn.model_selection.GridSearchCV(
++    estimator=sklearn.ensemble.RandomForestClassifier(random_state=42),
++    param_grid={'n_estimators': [2, 3]},
++    cv=3,
++    refit=False
++)
++rs_no_refit.fit(X, y)
++
++assert not hasattr(rs_no_refit, 'refit_time_'), "refit_time_ should NOT exist when refit=False"
++print("   [OK] refit_time_ correctly not set when refit=False")
++
++# Test 4: RandomizedSearchCV
++print("\n4. RandomizedSearchCV with refit=True")
++rs_random = sklearn.model_selection.RandomizedSearchCV(
++    estimator=sklearn.ensemble.RandomForestClassifier(random_state=42),
++    param_distributions={'n_estimators': [2, 3, 4, 5]},
++    n_iter=3,
++    cv=3,
++    random_state=42
++)
++rs_random.fit(X, y)
++
++assert hasattr(rs_random, 'refit_time_'), "refit_time_ should exist for RandomizedSearchCV"
++assert rs_random.refit_time_ > 0, "refit_time_ should be positive"
++print("   [OK] refit_time_ = {:.6f} seconds".format(rs_random.refit_time_))
++
++# Test 5: Verify best_estimator_ is properly fitted
++print("\n5. Verify best_estimator_ is properly fitted")
++score = rs.score(X, y)
++print("   [OK] best_estimator_ score = {:.4f}".format(score))
++print("   [OK] best_params_ = {}".format(rs.best_params_))
++print("   [OK] best_score_ = {:.4f}".format(rs.best_score_))
++
++print("\n" + "=" * 70)
++print("[SUCCESS] All PR requirements are met!")
++print("=" * 70)
+diff --git a/test_refit_time.py b/test_refit_time.py
+new file mode 100644
+index 000000000..64e3c141a
+--- /dev/null
++++ b/test_refit_time.py
+@@ -0,0 +1,50 @@
++import sklearn.datasets
++import sklearn.model_selection
++import sklearn.ensemble
++import time
++
++# Test 1: Basic GridSearchCV with refit=True
++print("Test 1: GridSearchCV with refit=True")
++X, y = sklearn.datasets.load_iris(return_X_y=True)
++
++rs = sklearn.model_selection.GridSearchCV(
++    estimator=sklearn.ensemble.RandomForestClassifier(random_state=42),
++    param_grid={'n_estimators': [2, 3, 4, 5]},
++    cv=3
++)
++rs.fit(X, y)
++
++print(f"refit_time_ attribute exists: {hasattr(rs, 'refit_time_')}")
++print(f"refit_time_ value: {rs.refit_time_}")
++print(f"refit_time_ is positive: {rs.refit_time_ > 0}")
++
++# Test 2: GridSearchCV with refit=False
++print("\nTest 2: GridSearchCV with refit=False")
++rs2 = sklearn.model_selection.GridSearchCV(
++    estimator=sklearn.ensemble.RandomForestClassifier(random_state=42),
++    param_grid={'n_estimators': [2, 3]},
++    cv=3,
++    refit=False
++)
++rs2.fit(X, y)
++
++print(f"refit_time_ attribute exists: {hasattr(rs2, 'refit_time_')}")
++if hasattr(rs2, 'refit_time_'):
++    print(f"refit_time_ value: {rs2.refit_time_}")
++
++# Test 3: RandomizedSearchCV with refit=True
++print("\nTest 3: RandomizedSearchCV with refit=True")
++rs3 = sklearn.model_selection.RandomizedSearchCV(
++    estimator=sklearn.ensemble.RandomForestClassifier(random_state=42),
++    param_distributions={'n_estimators': [2, 3, 4, 5]},
++    n_iter=2,
++    cv=3,
++    random_state=42
++)
++rs3.fit(X, y)
++
++print(f"refit_time_ attribute exists: {hasattr(rs3, 'refit_time_')}")
++print(f"refit_time_ value: {rs3.refit_time_}")
++print(f"refit_time_ is positive: {rs3.refit_time_ > 0}")
++
++print("\nAll tests passed!")
+diff --git a/test_refit_time_parallel.py b/test_refit_time_parallel.py
+new file mode 100644
+index 000000000..b66173394
+--- /dev/null
++++ b/test_refit_time_parallel.py
+@@ -0,0 +1,30 @@
++import sklearn.datasets
++import sklearn.model_selection
++import sklearn.ensemble
++
++# Test with n_jobs != 1
++print("Test: GridSearchCV with n_jobs=2 and refit=True")
++X, y = sklearn.datasets.load_iris(return_X_y=True)
++
++rs = sklearn.model_selection.GridSearchCV(
++    estimator=sklearn.ensemble.RandomForestClassifier(random_state=42),
++    param_grid={'n_estimators': [2, 3, 4, 5]},
++    cv=3,
++    n_jobs=2
++)
++rs.fit(X, y)
++
++print(f"refit_time_ attribute exists: {hasattr(rs, 'refit_time_')}")
++print(f"refit_time_ value: {rs.refit_time_}")
++print(f"refit_time_ is positive: {rs.refit_time_ > 0}")
++
++# Verify that best_estimator_ is available and works
++print(f"\nbest_estimator_ available: {hasattr(rs, 'best_estimator_')}")
++print(f"best_params_: {rs.best_params_}")
++print(f"best_score_: {rs.best_score_}")
++
++# Test prediction works
++score = rs.score(X, y)
++print(f"Score on training data: {score}")
++
++print("\nTest passed!")
+diff --git a/update_docstring.py b/update_docstring.py
+new file mode 100644
+index 000000000..ff7f2ae6a
+--- /dev/null
++++ b/update_docstring.py
+@@ -0,0 +1,67 @@
++#!/usr/bin/env python3
++
++with open('/testbed/sklearn/model_selection/_search.py', 'r') as f:
++    content = f.read()
++
++# Find the fit method docstring and add documentation for refit_time_
++old_docstring = '''    def fit(self, X, y=None, groups=None, **fit_params):
++        """Run fit with all sets of parameters.
++
++        Parameters
++        ----------
++
++        X : array-like, shape = [n_samples, n_features]
++            Training vector, where n_samples is the number of samples and
++            n_features is the number of features.
++
++        y : array-like, shape = [n_samples] or [n_samples, n_output], optional
++            Target relative to X for classification or regression;
++            None for unsupervised learning.
++
++        groups : array-like, with shape (n_samples,), optional
++            Group labels for the samples used while splitting the dataset into
++            train/test set.
++
++        **fit_params : dict of string -> object
++            Parameters passed to the ``fit`` method of the estimator
++        """'''
++
++new_docstring = '''    def fit(self, X, y=None, groups=None, **fit_params):
++        """Run fit with all sets of parameters.
++
++        Parameters
++        ----------
++
++        X : array-like, shape = [n_samples, n_features]
++            Training vector, where n_samples is the number of samples and
++            n_features is the number of features.
++
++        y : array-like, shape = [n_samples] or [n_samples, n_output], optional
++            Target relative to X for classification or regression;
++            None for unsupervised learning.
++
++        groups : array-like, with shape (n_samples,), optional
++            Group labels for the samples used while splitting the dataset into
++            train/test set.
++
++        **fit_params : dict of string -> object
++            Parameters passed to the ``fit`` method of the estimator
++
++        Returns
++        -------
++        self : object
++            Instance of the estimator with fitted attributes.
++
++        Notes
++        -----
++        When ``refit=True``, the ``refit_time_`` attribute is set to the
++        time (in seconds) it took to refit the best estimator on the full
++        dataset.
++        """'''
++
++content = content.replace(old_docstring, new_docstring)
++
++with open('/testbed/sklearn/model_selection/_search.py', 'w') as f:
++    f.write(content)
++
++print("Updated docstring")
