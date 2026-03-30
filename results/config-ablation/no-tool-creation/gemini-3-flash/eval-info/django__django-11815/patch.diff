@@ -1,0 +1,360 @@
+diff --git a/django/db/migrations/serializer.py b/django/db/migrations/serializer.py
+index 27b5cbd379..e075c148d5 100644
+--- a/django/db/migrations/serializer.py
++++ b/django/db/migrations/serializer.py
+@@ -120,8 +120,10 @@ class EnumSerializer(BaseSerializer):
+     def serialize(self):
+         enum_class = self.value.__class__
+         module = enum_class.__module__
++        if self.value.name and isinstance(self.value.value, Promise):
++            return "%s.%s['%s']" % (module, enum_class.__name__, self.value.name), {"import %s" % module}
+         v_string, v_imports = serializer_factory(self.value.value).serialize()
+-        imports = {'import %s' % module, *v_imports}
++        imports = {"import %s" % module, *v_imports}
+         return "%s.%s(%s)" % (module, enum_class.__name__, v_string), imports
+ 
+ 
+diff --git a/my_enums.py b/my_enums.py
+new file mode 100644
+index 0000000000..b19a095cd4
+--- /dev/null
++++ b/my_enums.py
+@@ -0,0 +1,4 @@
++from enum import Enum
++from django.utils.translation import gettext_lazy as _
++class Status(Enum):
++    GOOD = _('Good')
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..aeefd2d9d2
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,35 @@
++import os
++import django
++from django.conf import settings
++from enum import Enum
++from django.utils.translation import gettext_lazy as _
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++    )
++    django.setup()
++
++from django.db.migrations.serializer import serializer_factory
++
++class Status(Enum):
++    GOOD = _('Good')
++    BAD = _('Bad')
++    def __str__(self):
++        return self.name
++
++# Test serialization of the Enum member
++serialized, imports = serializer_factory(Status.GOOD).serialize()
++print(f"Serialized: {serialized}")
++print(f"Imports: {imports}")
++
++if "Status('Good')" in serialized:
++    print("Issue reproduced: Enum value used instead of name.")
++elif "Status['GOOD']" in serialized or "Status.GOOD" in serialized:
++    print("Issue not reproduced: Enum name used.")
++else:
++    print(f"Unexpected serialization: {serialized}")
+diff --git a/reproduce_issue_v2.py b/reproduce_issue_v2.py
+new file mode 100644
+index 0000000000..73ee663bd4
+--- /dev/null
++++ b/reproduce_issue_v2.py
+@@ -0,0 +1,45 @@
++import os
++import django
++from django.conf import settings
++from enum import Enum
++from django.utils.translation import gettext_lazy as _
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'django.contrib.auth',
++        ],
++    )
++    django.setup()
++
++from django.db.migrations.serializer import serializer_factory
++from django.db.models import TextChoices, IntegerChoices
++
++class Status(Enum):
++    GOOD = _('Good')
++    BAD = _('Bad')
++    def __str__(self):
++        return self.name
++
++class MyTextChoices(TextChoices):
++    GOOD = 'G', _('Good')
++    BAD = 'B', _('Bad')
++
++class MyIntegerChoices(IntegerChoices):
++    GOOD = 1, _('Good')
++    BAD = 2, _('Bad')
++
++def test_serialization(member, name):
++    serialized, imports = serializer_factory(member).serialize()
++    print(f"--- Testing {name} ---")
++    print(f"Member: {member}")
++    print(f"Serialized: {serialized}")
++    print(f"Imports: {imports}")
++    return serialized
++
++test_serialization(Status.GOOD, "Status.GOOD")
++test_serialization(MyTextChoices.GOOD, "MyTextChoices.GOOD")
++test_serialization(MyIntegerChoices.GOOD, "MyIntegerChoices.GOOD")
++
+diff --git a/test_choices.py b/test_choices.py
+new file mode 100644
+index 0000000000..ddc615b223
+--- /dev/null
++++ b/test_choices.py
+@@ -0,0 +1,17 @@
++import django
++from django.conf import settings
++from django.db import models
++from django.db.migrations.serializer import serializer_factory
++
++if not settings.configured:
++    settings.configure()
++    django.setup()
++
++from django.db.models import TextChoices
++
++class MyTextChoices(TextChoices):
++    GOOD = 'G', 'Good'
++
++serialized, imports = serializer_factory(MyTextChoices.GOOD).serialize()
++print(f"Serialized: {serialized}")
++print(f"Imports: {imports}")
+diff --git a/test_enum_mro.py b/test_enum_mro.py
+new file mode 100644
+index 0000000000..3fb9218b47
+--- /dev/null
++++ b/test_enum_mro.py
+@@ -0,0 +1,5 @@
++from enum import Enum
++class Status(Enum):
++    mro = 1
++print(f"Status.mro: {Status.mro}")
++print(f"Status['mro']: {Status['mro']}")
+diff --git a/test_enum_name.py b/test_enum_name.py
+new file mode 100644
+index 0000000000..57f59a0889
+--- /dev/null
++++ b/test_enum_name.py
+@@ -0,0 +1,5 @@
++from enum import Enum
++class Status(Enum):
++    name = 1
++print(f"Status.name: {Status.name}")
++print(f"Status['name']: {Status['name']}")
+diff --git a/test_enum_spaces.py b/test_enum_spaces.py
+new file mode 100644
+index 0000000000..0d092a636d
+--- /dev/null
++++ b/test_enum_spaces.py
+@@ -0,0 +1,4 @@
++from enum import Enum
++MyEnum = Enum('MyEnum', [('a b', 1)])
++print(f"Member: {MyEnum['a b']}")
++print(f"Name: {MyEnum['a b'].name}")
+diff --git a/test_flag.py b/test_flag.py
+new file mode 100644
+index 0000000000..1dc7368f48
+--- /dev/null
++++ b/test_flag.py
+@@ -0,0 +1,8 @@
++from enum import Flag
++class Color(Flag):
++    RED = 1
++    BLUE = 2
++
++c = Color.RED | Color.BLUE
++print(f"Name: {c.name}")
++print(f"Value: {c.value}")
+diff --git a/test_flag_serialization.py b/test_flag_serialization.py
+new file mode 100644
+index 0000000000..9f198c1dd6
+--- /dev/null
++++ b/test_flag_serialization.py
+@@ -0,0 +1,21 @@
++import django
++from django.conf import settings
++from enum import Flag
++from django.db.migrations.serializer import serializer_factory
++
++if not settings.configured:
++    settings.configure()
++    django.setup()
++
++class Color(Flag):
++    RED = 1
++    BLUE = 2
++    PURPLE = 3
++
++# Named member
++serialized, imports = serializer_factory(Color.PURPLE).serialize()
++print(f"Named Flag Serialized: {serialized}")
++
++# Unnamed combination
++serialized, imports = serializer_factory(Color.RED | Color.BLUE).serialize()
++print(f"Unnamed Flag Serialized: {serialized}")
+diff --git a/test_flag_serialization_2.py b/test_flag_serialization_2.py
+new file mode 100644
+index 0000000000..5fc8c1b055
+--- /dev/null
++++ b/test_flag_serialization_2.py
+@@ -0,0 +1,18 @@
++import django
++from django.conf import settings
++from enum import Flag
++from django.db.migrations.serializer import serializer_factory
++
++if not settings.configured:
++    settings.configure()
++    django.setup()
++
++class Color(Flag):
++    RED = 1
++    BLUE = 2
++
++# Unnamed combination
++c = Color.RED | Color.BLUE
++serialized, imports = serializer_factory(c).serialize()
++print(f"Unnamed Flag Serialized: {serialized}")
++print(f"Name: {c.name}")
+diff --git a/test_lazy.py b/test_lazy.py
+new file mode 100644
+index 0000000000..201c329b4a
+--- /dev/null
++++ b/test_lazy.py
+@@ -0,0 +1,13 @@
++import django
++from django.conf import settings
++from django.utils.translation import gettext_lazy as _
++from django.db.migrations.serializer import serializer_factory
++
++if not settings.configured:
++    settings.configure()
++    django.setup()
++
++s = _('Good')
++serialized, imports = serializer_factory(s).serialize()
++print(f"Serialized: {serialized}")
++print(f"Imports: {imports}")
+diff --git a/test_local_enum.py b/test_local_enum.py
+new file mode 100644
+index 0000000000..cdc7eb430d
+--- /dev/null
++++ b/test_local_enum.py
+@@ -0,0 +1,19 @@
++import django
++from django.conf import settings
++from enum import Enum
++from django.db.migrations.serializer import serializer_factory
++
++if not settings.configured:
++    settings.configure()
++    django.setup()
++
++def my_func():
++    class LocalEnum(Enum):
++        A = 1
++    return LocalEnum.A
++
++try:
++    serialized, imports = serializer_factory(my_func()).serialize()
++    print(f"Serialized: {serialized}")
++except Exception as e:
++    print(f"Error: {e}")
+diff --git a/test_nested_enum.py b/test_nested_enum.py
+new file mode 100644
+index 0000000000..6799f9e991
+--- /dev/null
++++ b/test_nested_enum.py
+@@ -0,0 +1,16 @@
++import django
++from django.conf import settings
++from enum import Enum
++from django.db.migrations.serializer import serializer_factory
++
++if not settings.configured:
++    settings.configure()
++    django.setup()
++
++class Outer:
++    class Status(Enum):
++        GOOD = 'G'
++
++serialized, imports = serializer_factory(Outer.Status.GOOD).serialize()
++print(f"Serialized: {serialized}")
++print(f"Imports: {imports}")
+diff --git a/test_nested_enum_2.py b/test_nested_enum_2.py
+new file mode 100644
+index 0000000000..1193d948c9
+--- /dev/null
++++ b/test_nested_enum_2.py
+@@ -0,0 +1,12 @@
++import django
++from django.conf import settings
++from enum import Enum
++if not settings.configured:
++    settings.configure()
++    django.setup()
++
++class Outer:
++    class Status(Enum):
++        GOOD = 'G'
++
++print(f"Qualname: {Outer.Status.__qualname__}")
+diff --git a/test_nested_enum_fixed.py b/test_nested_enum_fixed.py
+new file mode 100644
+index 0000000000..662e0ff8e3
+--- /dev/null
++++ b/test_nested_enum_fixed.py
+@@ -0,0 +1,15 @@
++import django
++from django.conf import settings
++from enum import Enum
++from django.db.migrations.serializer import serializer_factory
++
++if not settings.configured:
++    settings.configure()
++    django.setup()
++
++class Outer:
++    class Status(Enum):
++        GOOD = 'G'
++
++serialized, imports = serializer_factory(Outer.Status.GOOD).serialize()
++print(f"Serialized: {serialized}")
+diff --git a/test_remote_enum.py b/test_remote_enum.py
+new file mode 100644
+index 0000000000..9139bdf4c3
+--- /dev/null
++++ b/test_remote_enum.py
+@@ -0,0 +1,11 @@
++import django
++from django.conf import settings
++if not settings.configured:
++    settings.configure()
++    django.setup()
++from django.db.migrations.serializer import serializer_factory
++from my_enums import Status
++
++serialized, imports = serializer_factory(Status.GOOD).serialize()
++print(f"Serialized: {serialized}")
++print(f"Imports: {imports}")

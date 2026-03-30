@@ -1,0 +1,99 @@
+diff --git a/django/contrib/contenttypes/management/__init__.py b/django/contrib/contenttypes/management/__init__.py
+index 2b5f688136..563cba2fdf 100644
+--- a/django/contrib/contenttypes/management/__init__.py
++++ b/django/contrib/contenttypes/management/__init__.py
+@@ -24,7 +24,7 @@ class RenameContentType(migrations.RunPython):
+             content_type.model = new_model
+             try:
+                 with transaction.atomic(using=db):
+-                    content_type.save(update_fields={'model'})
++                    content_type.save(using=db, update_fields={'model'})
+             except IntegrityError:
+                 # Gracefully fallback if a stale content type causes a
+                 # conflict as remove_stale_contenttypes will take care of
+diff --git a/other_db.sqlite3 b/other_db.sqlite3
+new file mode 100644
+index 0000000000..b0bef9cc5a
+Binary files /dev/null and b/other_db.sqlite3 differ
+diff --git a/reproduce_app/__init__.py b/reproduce_app/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/reproduce_app/apps.py b/reproduce_app/apps.py
+new file mode 100644
+index 0000000000..99a38f7b1e
+--- /dev/null
++++ b/reproduce_app/apps.py
+@@ -0,0 +1,3 @@
++from django.apps import AppConfig
++class ReproduceAppConfig(AppConfig):
++    name = 'reproduce_app'
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..c195ebd8f4
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,64 @@
++import os
++import django
++from django.conf import settings
++from django.db import connections, migrations, models, router
++from django.contrib.contenttypes.management import RenameContentType
++
++# Configure Django with two databases: 'default' (empty/unused) and 'other'
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': 'default_db.sqlite3',
++    },
++    'other': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': 'other_db.sqlite3',
++    }
++}
++
++class Router:
++    def db_for_write(self, model, **hints):
++        return 'default'
++    def allow_migrate(self, db, app_label, model_name=None, **hints):
++        if db == 'default':
++            return False
++        return True
++
++if not settings.configured:
++    settings.configure(
++        DATABASES=DATABASES,
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++            'reproduce_app',
++        ],
++        DATABASE_ROUTERS=[Router()],
++    )
++    django.setup()
++
++# Create the tables in 'other' database
++from django.core.management import call_command
++call_command('migrate', database='other', verbosity=0)
++
++# Manually create a ContentType in 'other' database
++from django.contrib.contenttypes.models import ContentType
++ct = ContentType.objects.using('other').create(app_label='reproduce_app', model='oldmodel')
++print(f"Created ContentType in 'other' db: {ct}")
++
++# Try to rename the model using RenameContentType._rename
++rename_op = RenameContentType('reproduce_app', 'oldmodel', 'newmodel')
++apps = django.apps.apps
++
++print("Attempting rename on 'other' database...")
++try:
++    with connections['other'].schema_editor() as schema_editor:
++        rename_op._rename(apps, schema_editor, 'oldmodel', 'newmodel')
++    print("Rename successful!")
++    
++    # Verify
++    new_ct = ContentType.objects.using('other').get(app_label='reproduce_app', model='newmodel')
++    print(f"Found renamed ContentType: {new_ct}")
++except Exception as e:
++    print(f"Rename failed: {e}")
++    import traceback
++    traceback.print_exc()
++

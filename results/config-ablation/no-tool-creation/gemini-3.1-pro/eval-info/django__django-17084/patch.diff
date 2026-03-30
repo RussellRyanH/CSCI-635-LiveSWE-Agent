@@ -1,0 +1,132 @@
+diff --git a/django/db/models/expressions.py b/django/db/models/expressions.py
+index 280cb967b4..a185cda0d8 100644
+--- a/django/db/models/expressions.py
++++ b/django/db/models/expressions.py
+@@ -428,7 +428,7 @@ class BaseExpression:
+         return clone
+ 
+     def get_group_by_cols(self):
+-        if not self.contains_aggregate:
++        if not self.contains_aggregate and not self.contains_over_clause:
+             return [self]
+         cols = []
+         for source in self.get_source_expressions():
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index 13a6809dd8..36e0a77ec9 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -400,6 +400,7 @@ class Query(BaseExpression):
+         """
+         if not aggregate_exprs:
+             return {}
++        refs_window = False
+         # Store annotation mask prior to temporarily adding aggregations for
+         # resolving purpose to facilitate their subsequent removal.
+         refs_subquery = False
+@@ -414,6 +415,10 @@ class Query(BaseExpression):
+                 raise TypeError("%s is not an aggregate expression" % alias)
+             # Temporarily add aggregate to annotations to allow remaining
+             # members of `aggregates` to resolve against each others.
++            refs_window |= any(
++                getattr(self.annotations[ref], "contains_over_clause", False)
++                for ref in aggregate.get_refs()
++            )
+             self.append_annotation_mask([alias])
+             refs_subquery |= any(
+                 getattr(self.annotations[ref], "subquery", False)
+@@ -450,6 +455,7 @@ class Query(BaseExpression):
+             isinstance(self.group_by, tuple)
+             or self.is_sliced
+             or has_existing_aggregation
++            or refs_window
+             or refs_subquery
+             or qualify
+             or self.distinct
+diff --git a/reproduce.py b/reproduce.py
+new file mode 100644
+index 0000000000..0d73f8bfc2
+--- /dev/null
++++ b/reproduce.py
+@@ -0,0 +1,38 @@
++import os
++import django
++from django.conf import settings
++from django.db import models, connection
++from django.db.models import Sum, F, Window
++from django.db.models.functions import Coalesce
++
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=['__main__'],
++    DEBUG=True,
++)
++django.setup()
++
++class MyModel(models.Model):
++    date = models.DateField()
++    DJR = models.FloatField()
++
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(MyModel)
++
++MyModel.objects.create(date='2021-01-01', DJR=10)
++MyModel.objects.create(date='2021-01-02', DJR=20)
++
++queryset = MyModel.objects.annotate(
++    cumul_DJR=Coalesce(Window(Sum("DJR"), order_by=F("date").asc()), 0.0)
++)
++aggregate = queryset.aggregate(
++    DJR_total=Sum("DJR"),
++    cumul_DJR_total=Sum("cumul_DJR")
++)
++print("Success:", aggregate)
++print(connection.queries[-1]['sql'])
+diff --git a/test_sqlite.py b/test_sqlite.py
+new file mode 100644
+index 0000000000..8796dd9664
+--- /dev/null
++++ b/test_sqlite.py
+@@ -0,0 +1,8 @@
++import sqlite3
++conn = sqlite3.connect(':memory:')
++c = conn.cursor()
++c.execute('CREATE TABLE t (id INTEGER, date TEXT, DJR REAL)')
++c.execute("INSERT INTO t VALUES (1, '2021-01-01', 10)")
++c.execute("INSERT INTO t VALUES (2, '2021-01-02', 20)")
++c.execute('SELECT SUM(DJR) OVER (ORDER BY date ASC) FROM t')
++print(c.fetchall())
+diff --git a/test_window.py b/test_window.py
+new file mode 100644
+index 0000000000..7883bac42f
+--- /dev/null
++++ b/test_window.py
+@@ -0,0 +1,24 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models import Sum, F, Window
++from django.db.models.functions import Coalesce
++
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=['__main__'],
++)
++django.setup()
++
++w = Window(Sum("DJR"), order_by=F("date").asc())
++print("Window contains_aggregate:", w.contains_aggregate)
++c = Coalesce(w, 0.0)
++print("Coalesce contains_aggregate:", c.contains_aggregate)
++print("Window contains_over_clause:", w.contains_over_clause)
++print("Coalesce contains_over_clause:", c.contains_over_clause)

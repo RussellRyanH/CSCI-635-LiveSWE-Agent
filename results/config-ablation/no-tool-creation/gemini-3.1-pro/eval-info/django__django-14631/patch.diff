@@ -1,0 +1,219 @@
+diff --git a/django/forms/boundfield.py b/django/forms/boundfield.py
+index 88adadb37d..468db2b1eb 100644
+--- a/django/forms/boundfield.py
++++ b/django/forms/boundfield.py
+@@ -1,6 +1,7 @@
+ import datetime
+ import re
+ 
++from django.core.exceptions import ValidationError
+ from django.forms.utils import flatatt, pretty_name
+ from django.forms.widgets import Textarea, TextInput
+ from django.utils.functional import cached_property
+@@ -120,6 +121,22 @@ class BoundField:
+         """
+         return self.form._field_data_value(self.field, self.html_name)
+ 
++    def _did_change(self):
++        data_value = self.data
++        if not self.field.show_hidden_initial:
++            initial_value = self.initial
++        else:
++            initial_prefixed_name = self.form.add_initial_prefix(self.name)
++            hidden_widget = self.field.hidden_widget()
++            try:
++                initial_value = self.field.to_python(
++                    self.form._widget_data_value(hidden_widget, initial_prefixed_name)
++                )
++            except ValidationError:
++                # Always assume data has changed if validation fails.
++                return True
++        return self.field.has_changed(initial_value, data_value)
++
+     def value(self):
+         """
+         Return the value for this BoundField, using the initial value if
+diff --git a/django/forms/forms.py b/django/forms/forms.py
+index d14037bfe9..ee06c9eba3 100644
+--- a/django/forms/forms.py
++++ b/django/forms/forms.py
+@@ -143,6 +143,11 @@ class BaseForm:
+             'fields': ';'.join(self.fields),
+         }
+ 
++    def _bound_items(self):
++        """Yield (name, bf) pairs, where bf is a BoundField object."""
++        for name in self.fields:
++            yield name, self[name]
++
+     def __iter__(self):
+         for name in self.fields:
+             yield self[name]
+@@ -387,14 +392,12 @@ class BaseForm:
+         self._post_clean()
+ 
+     def _clean_fields(self):
+-        for name, field in self.fields.items():
+-            if field.disabled:
+-                value = self.get_initial_for_field(field, name)
+-            else:
+-                value = self._field_data_value(field, self.add_prefix(name))
++        for name, bf in self._bound_items():
++            field = bf.field
++            value = bf.initial if field.disabled else bf.data
+             try:
+                 if isinstance(field, FileField):
+-                    initial = self.get_initial_for_field(field, name)
++                    initial = bf.initial
+                     value = field.clean(value, initial)
+                 else:
+                     value = field.clean(value)
+@@ -436,27 +439,7 @@ class BaseForm:
+ 
+     @cached_property
+     def changed_data(self):
+-        data = []
+-        for name, field in self.fields.items():
+-            data_value = self._field_data_value(field, self.add_prefix(name))
+-            if not field.show_hidden_initial:
+-                # Use the BoundField's initial as this is the value passed to
+-                # the widget.
+-                initial_value = self[name].initial
+-            else:
+-                initial_prefixed_name = self.add_initial_prefix(name)
+-                hidden_widget = field.hidden_widget()
+-                try:
+-                    initial_value = field.to_python(
+-                        self._widget_data_value(hidden_widget, initial_prefixed_name)
+-                    )
+-                except ValidationError:
+-                    # Always assume data has changed if validation fails.
+-                    data.append(name)
+-                    continue
+-            if field.has_changed(initial_value, data_value):
+-                data.append(name)
+-        return data
++        return [name for name, bf in self._bound_items() if bf._did_change()]
+ 
+     @property
+     def media(self):
+diff --git a/patch_boundfield.py b/patch_boundfield.py
+new file mode 100644
+index 0000000000..044c0c5b5f
+--- /dev/null
++++ b/patch_boundfield.py
+@@ -0,0 +1,32 @@
++import re
++
++with open('django/forms/boundfield.py', 'r') as f:
++    content = f.read()
++
++did_change_method = """
++    def _did_change(self):
++        data_value = self.data
++        if not self.field.show_hidden_initial:
++            initial_value = self.initial
++        else:
++            initial_prefixed_name = self.form.add_initial_prefix(self.name)
++            hidden_widget = self.field.hidden_widget()
++            try:
++                initial_value = self.field.to_python(
++                    self.form._widget_data_value(hidden_widget, initial_prefixed_name)
++                )
++            except ValidationError:
++                # Always assume data has changed if validation fails.
++                return True
++        return self.field.has_changed(initial_value, data_value)
++"""
++
++# Add ValidationError import if not present
++if 'from django.core.exceptions import ValidationError' not in content:
++    content = content.replace('from django.forms.utils import flatatt, pretty_name', 'from django.core.exceptions import ValidationError\nfrom django.forms.utils import flatatt, pretty_name')
++
++# Add _did_change method to BoundField
++content = content.replace('    def value(self):', did_change_method.lstrip('\n') + '\n    def value(self):')
++
++with open('django/forms/boundfield.py', 'w') as f:
++    f.write(content)
+diff --git a/patch_forms.py b/patch_forms.py
+new file mode 100644
+index 0000000000..1acd52e1b4
+--- /dev/null
++++ b/patch_forms.py
+@@ -0,0 +1,63 @@
++import re
++
++with open('django/forms/forms.py', 'r') as f:
++    content = f.read()
++
++bound_items_method = """
++    def _bound_items(self):
++        \"\"\"Yield (name, bf) pairs, where bf is a BoundField object.\"\"\"
++        for name in self.fields:
++            yield name, self[name]
++"""
++
++# Add _bound_items method
++content = content.replace('    def __iter__(self):', bound_items_method.lstrip('\n') + '\n    def __iter__(self):')
++
++# Update changed_data
++changed_data_new = """    @cached_property
++    def changed_data(self):
++        return [name for name, bf in self._bound_items() if bf._did_change()]"""
++
++content = re.sub(r'    @cached_property\n    def changed_data\(self\):.*?(?=    @property\n    def media\(self\):)', changed_data_new + '\n\n', content, flags=re.DOTALL)
++
++# Update _clean_fields
++clean_fields_old = """    def _clean_fields(self):
++        for name, field in self.fields.items():
++            if field.disabled:
++                value = self.get_initial_for_field(field, name)
++            else:
++                value = self._field_data_value(field, self.add_prefix(name))
++            try:
++                if isinstance(field, FileField):
++                    initial = self.get_initial_for_field(field, name)
++                    value = field.clean(value, initial)
++                else:
++                    value = field.clean(value)
++                self.cleaned_data[name] = value
++                if hasattr(self, 'clean_%s' % name):
++                    value = getattr(self, 'clean_%s' % name)()
++                    self.cleaned_data[name] = value
++            except ValidationError as e:
++                self.add_error(name, e)"""
++
++clean_fields_new = """    def _clean_fields(self):
++        for name, bf in self._bound_items():
++            field = bf.field
++            value = bf.initial if field.disabled else bf.data
++            try:
++                if isinstance(field, FileField):
++                    initial = bf.initial
++                    value = field.clean(value, initial)
++                else:
++                    value = field.clean(value)
++                self.cleaned_data[name] = value
++                if hasattr(self, 'clean_%s' % name):
++                    value = getattr(self, 'clean_%s' % name)()
++                    self.cleaned_data[name] = value
++            except ValidationError as e:
++                self.add_error(name, e)"""
++
++content = content.replace(clean_fields_old, clean_fields_new)
++
++with open('django/forms/forms.py', 'w') as f:
++    f.write(content)
+diff --git a/tests/forms_tests/tests/test_forms.py b/tests/forms_tests/tests/test_forms.py
+index e1567f12ce..f4a32d8f62 100644
+--- a/tests/forms_tests/tests/test_forms.py
++++ b/tests/forms_tests/tests/test_forms.py
+@@ -2120,7 +2120,7 @@ Password: <input type="password" name="password" required></li>
+ 
+         form = DateTimeForm({})
+         self.assertEqual(form.errors, {})
+-        self.assertEqual(form.cleaned_data, {'dt': now})
++        self.assertEqual(form.cleaned_data, {'dt': now.replace(microsecond=0)})
+ 
+     def test_datetime_changed_data_callable_with_microseconds(self):
+         class DateTimeForm(forms.Form):

@@ -1,0 +1,183 @@
+diff --git a/django/db/migrations/recorder.py b/django/db/migrations/recorder.py
+index 1a37c6b7d0..f1f4a2d6c0 100644
+--- a/django/db/migrations/recorder.py
++++ b/django/db/migrations/recorder.py
+@@ -1,5 +1,5 @@
+ from django.apps.registry import Apps
+-from django.db import DatabaseError, models
++from django.db import DatabaseError, models, router
+ from django.utils.functional import classproperty
+ from django.utils.timezone import now
+ 
+@@ -56,7 +56,7 @@ class MigrationRecorder:
+             tables = self.connection.introspection.table_names(cursor)
+         return self.Migration._meta.db_table in tables
+ 
+-    def ensure_schema(self):
++    def _ensure_schema(self):
+         """Ensure the table exists and has the correct schema."""
+         # If the table's there, that's fine - we've never changed its schema
+         # in the codebase.
+@@ -69,6 +69,13 @@ class MigrationRecorder:
+         except DatabaseError as exc:
+             raise MigrationSchemaMissing("Unable to create the django_migrations table (%s)" % exc)
+ 
++    def ensure_schema(self):
++        """Ensure the table exists and has the correct schema."""
++        # Check if we're allowed to create the table
++        if not router.allow_migrate_model(self.connection.alias, self.Migration):
++            return
++        self._ensure_schema()
++
+     def applied_migrations(self):
+         """
+         Return a dict mapping (app_name, migration_name) to Migration instances
+@@ -83,14 +90,20 @@ class MigrationRecorder:
+ 
+     def record_applied(self, app, name):
+         """Record that a migration was applied."""
+-        self.ensure_schema()
++        if not router.allow_migrate(self.connection.alias, app):
++            return
++        self._ensure_schema()
+         self.migration_qs.create(app=app, name=name)
+ 
+     def record_unapplied(self, app, name):
+         """Record that a migration was unapplied."""
+-        self.ensure_schema()
++        if not router.allow_migrate(self.connection.alias, app):
++            return
++        self._ensure_schema()
+         self.migration_qs.filter(app=app, name=name).delete()
+ 
+     def flush(self):
+         """Delete all migration records. Useful for testing migrations."""
++        if not router.allow_migrate_model(self.connection.alias, self.Migration):
++            return
+         self.migration_qs.all().delete()
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..8aa878bb2e
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,50 @@
++import os
++import django
++from django.conf import settings
++from django.db import connections, router
++from django.db.migrations.recorder import MigrationRecorder
++
++# Configure Django settings
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    },
++    'other': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    },
++}
++
++class Router:
++    def allow_migrate(self, db, app_label, model_name=None, **hints):
++        if db == 'default':
++            return True
++        return False
++
++settings.configure(
++    DATABASES=DATABASES,
++    DATABASE_ROUTERS=[Router()],
++    INSTALLED_APPS=[],
++)
++django.setup()
++
++def test_migration_recorder():
++    for db_alias in DATABASES:
++        print(f"Checking database: {db_alias}")
++        connection = connections[db_alias]
++        recorder = MigrationRecorder(connection)
++        
++        # This should not create the table if allow_migrate returns False
++        recorder.ensure_schema()
++        
++        has_table = recorder.has_table()
++        print(f"Database '{db_alias}' has django_migrations table: {has_table}")
++        
++        if db_alias == 'other' and has_table:
++            print("ISSUE REPRODUCED: django_migrations table created on 'other' database!")
++        elif db_alias == 'other' and not has_table:
++            print("SUCCESS: django_migrations table NOT created on 'other' database.")
++
++if __name__ == "__main__":
++    test_migration_recorder()
+diff --git a/reproduce_issue_v2.py b/reproduce_issue_v2.py
+new file mode 100644
+index 0000000000..94958a04aa
+--- /dev/null
++++ b/reproduce_issue_v2.py
+@@ -0,0 +1,64 @@
++import os
++import django
++from django.conf import settings
++from django.db import connections, router
++from django.db.migrations.recorder import MigrationRecorder
++
++# Configure Django settings
++DATABASES = {
++    'default': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    },
++    'other': {
++        'ENGINE': 'django.db.backends.sqlite3',
++        'NAME': ':memory:',
++    },
++}
++
++class Router:
++    def allow_migrate(self, db, app_label, model_name=None, **hints):
++        if db == 'default':
++            return True
++        return False
++
++settings.configure(
++    DATABASES=DATABASES,
++    DATABASE_ROUTERS=[Router()],
++    INSTALLED_APPS=[],
++)
++django.setup()
++
++def test_migration_recorder():
++    for db_alias in DATABASES:
++        print(f"Checking database: {db_alias}")
++        connection = connections[db_alias]
++        recorder = MigrationRecorder(connection)
++        
++        # Test ensure_schema
++        recorder.ensure_schema()
++        has_table = recorder.has_table()
++        print(f"  Database '{db_alias}' has django_migrations table: {has_table}")
++        
++        # Test record_applied
++        print(f"  Recording applied migration on '{db_alias}'")
++        recorder.record_applied('app1', '0001_initial')
++        
++        # Test applied_migrations
++        applied = recorder.applied_migrations()
++        print(f"  Applied migrations on '{db_alias}': {list(applied.keys())}")
++        
++        # Test record_unapplied
++        print(f"  Recording unapplied migration on '{db_alias}'")
++        recorder.record_unapplied('app1', '0001_initial')
++        
++        if db_alias == 'other':
++            if has_table:
++                print("  ISSUE: django_migrations table created on 'other' database!")
++            if ('app1', '0001_initial') in applied:
++                print("  ISSUE: migration recorded on 'other' database!")
++            if not has_table and ('app1', '0001_initial') not in applied:
++                print("  SUCCESS: No migration activity on 'other' database.")
++
++if __name__ == "__main__":
++    test_migration_recorder()

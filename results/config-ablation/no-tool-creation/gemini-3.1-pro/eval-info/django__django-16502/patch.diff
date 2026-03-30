@@ -1,0 +1,288 @@
+diff --git a/django/core/servers/basehttp.py b/django/core/servers/basehttp.py
+index fef5532e58..a3ac5df9f5 100644
+--- a/django/core/servers/basehttp.py
++++ b/django/core/servers/basehttp.py
+@@ -128,6 +128,30 @@ class ServerHandler(simple_server.ServerHandler):
+             LimitedStream(stdin, content_length), stdout, stderr, environ, **kwargs
+         )
+ 
++    def setup_environ(self):
++        super().setup_environ()
++        self.request_method = self.environ['REQUEST_METHOD']
++
++    def finish_response(self):
++        try:
++            if not self.result_is_file() or not self.sendfile():
++                for data in self.result:
++                    if self.request_method == 'HEAD':
++                        if not self.headers_sent:
++                            self.bytes_sent = len(data)
++                            self.send_headers()
++                        else:
++                            self.bytes_sent += len(data)
++                    else:
++                        self.write(data)
++                self.finish_content()
++        except:
++            if hasattr(self.result, 'close'):
++                self.result.close()
++            raise
++        else:
++            self.close()
++
+     def cleanup_headers(self):
+         super().cleanup_headers()
+         # HTTP/1.1 requires support for persistent connections. Send 'close' if
+diff --git a/patch.py b/patch.py
+new file mode 100644
+index 0000000000..e589ba9235
+--- /dev/null
++++ b/patch.py
+@@ -0,0 +1,32 @@
++import re
++
++with open('django/core/servers/basehttp.py', 'r') as f:
++    content = f.read()
++
++new_methods = """
++    def setup_environ(self):
++        super().setup_environ()
++        self.request_method = self.environ['REQUEST_METHOD']
++
++    def finish_response(self):
++        try:
++            if not self.result_is_file() or not self.sendfile():
++                for data in self.result:
++                    if self.request_method != 'HEAD':
++                        self.write(data)
++                self.finish_content()
++        except Exception:
++            if hasattr(self.result, 'close'):
++                self.result.close()
++            raise
++        else:
++            self.close()
++"""
++
++content = content.replace(
++    "    def cleanup_headers(self):",
++    new_methods.lstrip('\n') + "\n    def cleanup_headers(self):"
++)
++
++with open('django/core/servers/basehttp.py', 'w') as f:
++    f.write(content)
+diff --git a/patch2.py b/patch2.py
+new file mode 100644
+index 0000000000..bb7b04da82
+--- /dev/null
++++ b/patch2.py
+@@ -0,0 +1,54 @@
++with open('django/core/servers/basehttp.py', 'r') as f:
++    content = f.read()
++
++content = content.replace("""
++    def finish_response(self):
++        try:
++            if not self.result_is_file() or not self.sendfile():
++                for data in self.result:
++                    if self.request_method != 'HEAD':
++                        self.write(data)
++                self.finish_content()
++        except Exception:
++            if hasattr(self.result, 'close'):
++                self.result.close()
++            raise
++        else:
++            self.close()
++""", "")
++
++new_methods = """
++    def setup_environ(self):
++        super().setup_environ()
++        self.request_method = self.environ['REQUEST_METHOD']
++
++    def finish_response(self):
++        try:
++            if not self.result_is_file() or not self.sendfile():
++                for data in self.result:
++                    self.write(data)
++                self.finish_content()
++        except Exception:
++            if hasattr(self.result, 'close'):
++                self.result.close()
++            raise
++        else:
++            self.close()
++
++    def _write(self, data):
++        if self.request_method != 'HEAD':
++            super()._write(data)
++
++    def _flush(self):
++        if self.request_method != 'HEAD':
++            super()._flush()
++"""
++
++content = content.replace("""
++    def setup_environ(self):
++        super().setup_environ()
++        self.request_method = self.environ['REQUEST_METHOD']
++""", new_methods.lstrip('\n'))
++
++with open('django/core/servers/basehttp.py', 'w') as f:
++    f.write(content)
+diff --git a/patch3.py b/patch3.py
+new file mode 100644
+index 0000000000..de86027e3b
+--- /dev/null
++++ b/patch3.py
+@@ -0,0 +1,48 @@
++with open('django/core/servers/basehttp.py', 'r') as f:
++    content = f.read()
++
++content = content.replace("""
++    def finish_response(self):
++        try:
++            if not self.result_is_file() or not self.sendfile():
++                for data in self.result:
++                    self.write(data)
++                self.finish_content()
++        except Exception:
++            if hasattr(self.result, 'close'):
++                self.result.close()
++            raise
++        else:
++            self.close()
++
++    def _write(self, data):
++        if self.request_method != 'HEAD':
++            super()._write(data)
++
++    def _flush(self):
++        if self.request_method != 'HEAD':
++            super()._flush()
++""", """
++    def finish_response(self):
++        try:
++            if not self.result_is_file() or not self.sendfile():
++                for data in self.result:
++                    if self.request_method == 'HEAD':
++                        if not self.headers_sent:
++                            self.bytes_sent = len(data)
++                            self.send_headers()
++                        else:
++                            self.bytes_sent += len(data)
++                    else:
++                        self.write(data)
++                self.finish_content()
++        except Exception:
++            if hasattr(self.result, 'close'):
++                self.result.close()
++            raise
++        else:
++            self.close()
++""")
++
++with open('django/core/servers/basehttp.py', 'w') as f:
++    f.write(content)
+diff --git a/test_curl.py b/test_curl.py
+new file mode 100644
+index 0000000000..e450ac27af
+--- /dev/null
++++ b/test_curl.py
+@@ -0,0 +1,19 @@
++import subprocess
++import threading
++import time
++from django.core.servers.basehttp import run, WSGIRequestHandler, WSGIServer
++
++def app(environ, start_response):
++    start_response('200 OK', [('Content-Type', 'text/plain')])
++    return [b"Hello World\n"]
++
++def start_server():
++    run('127.0.0.1', 8001, app, server_cls=WSGIServer)
++
++t = threading.Thread(target=start_server)
++t.daemon = True
++t.start()
++time.sleep(1)
++
++out = subprocess.check_output(['curl', '-iX', 'HEAD', 'http://127.0.0.1:8001/'])
++print(out.decode('utf-8'))
+diff --git a/test_curl2.py b/test_curl2.py
+new file mode 100644
+index 0000000000..0649dd76b6
+--- /dev/null
++++ b/test_curl2.py
+@@ -0,0 +1,19 @@
++import subprocess
++import threading
++import time
++from django.core.servers.basehttp import run, WSGIRequestHandler, WSGIServer
++
++def app(environ, start_response):
++    start_response('200 OK', [('Content-Type', 'text/plain')])
++    return [b"Hello World\n"]
++
++def start_server():
++    run('127.0.0.1', 8002, app, server_cls=WSGIServer)
++
++t = threading.Thread(target=start_server)
++t.daemon = True
++t.start()
++time.sleep(1)
++
++out = subprocess.check_output(['curl', '-I', 'http://127.0.0.1:8002/'])
++print(out.decode('utf-8'))
+diff --git a/test_empty.py b/test_empty.py
+new file mode 100644
+index 0000000000..3182348cee
+--- /dev/null
++++ b/test_empty.py
+@@ -0,0 +1,19 @@
++import subprocess
++import threading
++import time
++from django.core.servers.basehttp import run, WSGIRequestHandler, WSGIServer
++
++def app(environ, start_response):
++    start_response('200 OK', [('Content-Type', 'text/plain'), ('Content-Length', '100')])
++    return []
++
++def start_server():
++    run('127.0.0.1', 8004, app, server_cls=WSGIServer)
++
++t = threading.Thread(target=start_server)
++t.daemon = True
++t.start()
++time.sleep(1)
++
++out = subprocess.check_output(['curl', '-I', 'http://127.0.0.1:8004/'])
++print(out.decode('utf-8'))
+diff --git a/test_head.py b/test_head.py
+new file mode 100644
+index 0000000000..c3e4088948
+--- /dev/null
++++ b/test_head.py
+@@ -0,0 +1,20 @@
++import requests
++import threading
++import time
++from django.core.servers.basehttp import run, WSGIRequestHandler, WSGIServer
++
++def app(environ, start_response):
++    start_response('200 OK', [('Content-Type', 'text/plain')])
++    return [b"Hello World\n"]
++
++def start_server():
++    run('127.0.0.1', 8000, app, server_cls=WSGIServer)
++
++t = threading.Thread(target=start_server)
++t.daemon = True
++t.start()
++time.sleep(1)
++
++r = requests.head('http://127.0.0.1:8000/')
++print("HEAD response body:", repr(r.content))
++print("HEAD response headers:", r.headers)

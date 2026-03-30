@@ -1,0 +1,175 @@
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 000000000..b982e5ead
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,35 @@
++import numpy as np
++from sklearn.linear_model import LassoLarsIC
++from sklearn.datasets import make_regression
++
++X, y = make_regression(n_samples=100, n_features=10, noise=0.1, random_state=42)
++
++# Case 1: copy_X=False in __init__, but default True in fit()
++# We want to see if X is modified when we expect it not to be, 
++# or if the behavior is inconsistent.
++X_orig = X.copy()
++model = LassoLarsIC(copy_X=False)
++model.fit(X, y)
++
++# If copy_X=False was respected everywhere, X might be modified.
++# But here we want to check if the internal calls are using the right copy_X.
++
++print(f"Model copy_X: {model.copy_X}")
++
++# Let's trace what happens:
++# 1. LinearModel._preprocess_data(X, y, ..., self.copy_X) -> uses self.copy_X (False)
++# 2. lars_path(X, y, ..., copy_X=copy_X, ...) -> uses fit's copy_X (True)
++
++# To really see it, we can mock lars_path or just check the code.
++# But the PR says: "my choice will be silently overwritten"
++
++# Another way to show it:
++class MockLassoLarsIC(LassoLarsIC):
++    def fit(self, X, y, copy_X=True):
++        self.fit_copy_X_arg = copy_X
++        return super().fit(X, y, copy_X=copy_X)
++
++model2 = MockLassoLarsIC(copy_X=False)
++model2.fit(X, y)
++print(f"Value passed to fit: {model2.fit_copy_X_arg}")
++print(f"Value in self.copy_X: {model2.copy_X}")
+diff --git a/sklearn/linear_model/least_angle.py b/sklearn/linear_model/least_angle.py
+index 03b34a0dc..c866f54a5 100644
+--- a/sklearn/linear_model/least_angle.py
++++ b/sklearn/linear_model/least_angle.py
+@@ -1479,7 +1479,7 @@ class LassoLarsIC(LassoLars):
+         self.eps = eps
+         self.fit_path = True
+ 
+-    def fit(self, X, y, copy_X=True):
++    def fit(self, X, y, copy_X=None):
+         """Fit the model using X, y as training data.
+ 
+         Parameters
+@@ -1490,7 +1490,7 @@ class LassoLarsIC(LassoLars):
+         y : array-like, shape (n_samples,)
+             target values. Will be cast to X's dtype if necessary
+ 
+-        copy_X : boolean, optional, default True
++        copy_X : boolean, optional, default None
+             If ``True``, X will be copied; else, it may be overwritten.
+ 
+         Returns
+@@ -1498,10 +1498,12 @@ class LassoLarsIC(LassoLars):
+         self : object
+             returns an instance of self.
+         """
++        if copy_X is None:
++            copy_X = self.copy_X
+         X, y = check_X_y(X, y, y_numeric=True)
+ 
+         X, y, Xmean, ymean, Xstd = LinearModel._preprocess_data(
+-            X, y, self.fit_intercept, self.normalize, self.copy_X)
++            X, y, self.fit_intercept, self.normalize, copy_X)
+         max_iter = self.max_iter
+ 
+         Gram = self.precompute
+diff --git a/verify_fix.py b/verify_fix.py
+new file mode 100644
+index 000000000..16fde53a8
+--- /dev/null
++++ b/verify_fix.py
+@@ -0,0 +1,26 @@
++import numpy as np
++from sklearn.linear_model import LassoLarsIC
++from sklearn.datasets import make_regression
++
++X, y = make_regression(n_samples=100, n_features=10, noise=0.1, random_state=42)
++
++# Case 1: copy_X=False in __init__, default in fit()
++model1 = LassoLarsIC(copy_X=False)
++model1.fit(X, y)
++print(f"Case 1 - self.copy_X: {model1.copy_X}") # Should be False
++
++# Case 2: copy_X=True in __init__, default in fit()
++model2 = LassoLarsIC(copy_X=True)
++model2.fit(X, y)
++print(f"Case 2 - self.copy_X: {model2.copy_X}") # Should be True
++
++# Case 3: copy_X=False in __init__, copy_X=True in fit()
++model3 = LassoLarsIC(copy_X=False)
++model3.fit(X, y, copy_X=True)
++print(f"Case 3 - self.copy_X: {model3.copy_X}") # Should be True
++
++# Case 4: copy_X=True in __init__, copy_X=False in fit()
++model4 = LassoLarsIC(copy_X=True)
++model4.fit(X, y, copy_X=False)
++print(f"Case 4 - self.copy_X: {model4.copy_X}") # Should be False
++
+diff --git a/verify_fix_v2.py b/verify_fix_v2.py
+new file mode 100644
+index 000000000..f1858e7dc
+--- /dev/null
++++ b/verify_fix_v2.py
+@@ -0,0 +1,26 @@
++import numpy as np
++from sklearn.linear_model import LassoLarsIC
++from sklearn.datasets import make_regression
++
++X, y = make_regression(n_samples=100, n_features=10, noise=0.1, random_state=42)
++
++# Case 1: copy_X=False in __init__, default in fit()
++model1 = LassoLarsIC(copy_X=False)
++model1.fit(X, y)
++print(f"Case 1 - self.copy_X: {model1.copy_X}") # Should be False
++
++# Case 2: copy_X=True in __init__, default in fit()
++model2 = LassoLarsIC(copy_X=True)
++model2.fit(X, y)
++print(f"Case 2 - self.copy_X: {model2.copy_X}") # Should be True
++
++# Case 3: copy_X=False in __init__, copy_X=True in fit()
++model3 = LassoLarsIC(copy_X=False)
++model3.fit(X, y, copy_X=True)
++print(f"Case 3 - self.copy_X: {model3.copy_X}") # Should be False (now we don't modify self.copy_X)
++
++# Case 4: copy_X=True in __init__, copy_X=False in fit()
++model4 = LassoLarsIC(copy_X=True)
++model4.fit(X, y, copy_X=False)
++print(f"Case 4 - self.copy_X: {model4.copy_X}") # Should be True (now we don't modify self.copy_X)
++
+diff --git a/verify_usage.py b/verify_usage.py
+new file mode 100644
+index 000000000..7dbdfbc6b
+--- /dev/null
++++ b/verify_usage.py
+@@ -0,0 +1,28 @@
++import numpy as np
++from sklearn.linear_model import LassoLarsIC
++from sklearn.datasets import make_regression
++
++# Create a dataset where X is not centered
++X, y = make_regression(n_samples=100, n_features=10, noise=0.1, random_state=42)
++X += 10.0 
++
++# Case: copy_X=False passed to fit
++X_copy = X.copy()
++model = LassoLarsIC(copy_X=True) # init with True
++model.fit(X_copy, y, copy_X=False) # fit with False
++
++# If copy_X=False was respected, X_copy might have been modified (centered)
++if np.allclose(X_copy, X):
++    print("X was NOT modified")
++else:
++    print("X WAS modified")
++
++# Case: copy_X=True passed to fit
++X_copy2 = X.copy()
++model2 = LassoLarsIC(copy_X=False) # init with False
++model2.fit(X_copy2, y, copy_X=True) # fit with True
++
++if np.allclose(X_copy2, X):
++    print("X2 was NOT modified")
++else:
++    print("X2 WAS modified")
