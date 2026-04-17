@@ -1,0 +1,434 @@
+diff --git a/django/db/models/fields/json.py b/django/db/models/fields/json.py
+index fdca700c9d..d4171f1997 100644
+--- a/django/db/models/fields/json.py
++++ b/django/db/models/fields/json.py
+@@ -171,6 +171,7 @@ class ContainedBy(PostgresOperatorLookup):
+ 
+ class HasKeyLookup(PostgresOperatorLookup):
+     logical_operator = None
++    compile_json_path_strictly_as_keys = True
+ 
+     def as_sql(self, compiler, connection, template=None):
+         # Process JSON path from the left-hand side.
+@@ -193,11 +194,17 @@ class HasKeyLookup(PostgresOperatorLookup):
+                 *_, rhs_key_transforms = key.preprocess_lhs(compiler, connection)
+             else:
+                 rhs_key_transforms = [key]
++            
++            if not isinstance(key, KeyTransform) and getattr(self, "compile_json_path_strictly_as_keys", False):
++                compiled_path = ".%s" % json.dumps(str(key))
++            else:
++                compiled_path = compile_json_path(rhs_key_transforms, include_root=False)
++                
+             rhs_params.append(
+                 "%s%s"
+                 % (
+                     lhs_json_path,
+-                    compile_json_path(rhs_key_transforms, include_root=False),
++                    compiled_path,
+                 )
+             )
+         # Add condition for each key.
+@@ -387,10 +394,12 @@ class KeyTransformTextLookupMixin:
+ class KeyTransformIsNull(lookups.IsNull):
+     # key__isnull=False is the same as has_key='key'
+     def as_oracle(self, compiler, connection):
+-        sql, params = HasKey(
++        has_key_expr = HasKey(
+             self.lhs.lhs,
+             self.lhs.key_name,
+-        ).as_oracle(compiler, connection)
++        )
++        has_key_expr.compile_json_path_strictly_as_keys = False
++        sql, params = has_key_expr.as_oracle(compiler, connection)
+         if not self.rhs:
+             return sql, params
+         # Column doesn't have a key or IS NULL.
+@@ -401,7 +410,9 @@ class KeyTransformIsNull(lookups.IsNull):
+         template = "JSON_TYPE(%s, %%s) IS NULL"
+         if not self.rhs:
+             template = "JSON_TYPE(%s, %%s) IS NOT NULL"
+-        return HasKey(self.lhs.lhs, self.lhs.key_name).as_sql(
++        has_key_expr = HasKey(self.lhs.lhs, self.lhs.key_name)
++        has_key_expr.compile_json_path_strictly_as_keys = False
++        return has_key_expr.as_sql(
+             compiler,
+             connection,
+             template=template,
+diff --git a/fix.py b/fix.py
+new file mode 100644
+index 0000000000..e47b20997e
+--- /dev/null
++++ b/fix.py
+@@ -0,0 +1,82 @@
++with open("django/db/models/fields/json.py", "r") as f:
++    content = f.read()
++
++import re
++
++# Fix KeyTransformIsNull.as_oracle
++old_str = """class KeyTransformIsNull(lookups.IsNull):
++    # key__isnull=False is the same as has_key='key'
++    def as_oracle(self, compiler, connection):
++        has_key_expr = HasKey(
++            self.lhs.lhs,
++            self.lhs.key_name,
++        )
++        has_key_expr.compile_json_path_strictly_as_keys = False
++        sql, params = has_key_expr.as_oracle(compiler, connection)
++        #
++            self.lhs.lhs,
++            self.lhs.key_name,
++        ).as_oracle(compiler, connection)
++        if not self.rhs:"""
++
++new_str = """class KeyTransformIsNull(lookups.IsNull):
++    # key__isnull=False is the same as has_key='key'
++    def as_oracle(self, compiler, connection):
++        has_key_expr = HasKey(
++            self.lhs.lhs,
++            self.lhs.key_name,
++        )
++        has_key_expr.compile_json_path_strictly_as_keys = False
++        sql, params = has_key_expr.as_oracle(compiler, connection)
++        if not self.rhs:"""
++
++content = content.replace(old_str, new_str)
++
++# Add compile_json_path_strictly_as_keys = True to HasKeyLookup
++content = content.replace(
++"""class HasKeyLookup(PostgresOperatorLookup):
++    logical_operator = None
++
++    def as_sql(self, compiler, connection, template=None):""",
++"""class HasKeyLookup(PostgresOperatorLookup):
++    logical_operator = None
++    compile_json_path_strictly_as_keys = True
++
++    def as_sql(self, compiler, connection, template=None):"""
++)
++
++# Use compile_json_path_strictly_as_keys in HasKeyLookup.as_sql
++as_sql_old = """            if isinstance(key, KeyTransform):
++                *_, rhs_key_transforms = key.preprocess_lhs(compiler, connection)
++            else:
++                rhs_key_transforms = [key]
++            rhs_params.append(
++                "%s%s"
++                % (
++                    lhs_json_path,
++                    compile_json_path(rhs_key_transforms, include_root=False),
++                )
++            )"""
++
++as_sql_new = """            if isinstance(key, KeyTransform):
++                *_, rhs_key_transforms = key.preprocess_lhs(compiler, connection)
++            else:
++                rhs_key_transforms = [key]
++            
++            if not isinstance(key, KeyTransform) and getattr(self, "compile_json_path_strictly_as_keys", False):
++                compiled_path = ".%s" % json.dumps(str(key))
++            else:
++                compiled_path = compile_json_path(rhs_key_transforms, include_root=False)
++                
++            rhs_params.append(
++                "%s%s"
++                % (
++                    lhs_json_path,
++                    compiled_path,
++                )
++            )"""
++
++content = content.replace(as_sql_old, as_sql_new)
++
++with open("django/db/models/fields/json.py", "w") as f:
++    f.write(content)
+diff --git a/test_has_key_pg.py b/test_has_key_pg.py
+new file mode 100644
+index 0000000000..62cab7f967
+--- /dev/null
++++ b/test_has_key_pg.py
+@@ -0,0 +1,37 @@
++import django
++from django.conf import settings
++import json
++
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[],
++)
++django.setup()
++from django.db import models
++
++class JsonFieldHasKeyTest(models.Model):
++    data = models.JSONField()
++    class Meta:
++        app_label = 'my_app'
++
++def main():
++    from django.db import connection
++    with connection.cursor() as cursor:
++        cursor.execute("CREATE TABLE my_app_jsonfieldhaskeytest (id INTEGER PRIMARY KEY, data TEXT);")
++    
++    test2 = JsonFieldHasKeyTest(data=['bar', 'baz'])
++    test2.save()
++    
++    test3 = JsonFieldHasKeyTest(data={'0': 'bar'})
++    test3.save()
++    
++    c2 = JsonFieldHasKeyTest.objects.filter(data__has_key='0').count()
++    print("has_key='0':", c2)
++
++if __name__ == '__main__':
++    main()
+diff --git a/test_has_key_pg2.py b/test_has_key_pg2.py
+new file mode 100644
+index 0000000000..72016480e7
+--- /dev/null
++++ b/test_has_key_pg2.py
+@@ -0,0 +1,37 @@
++import django
++from django.conf import settings
++import json
++
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[],
++)
++django.setup()
++from django.db import models
++
++class JsonFieldHasKeyTest(models.Model):
++    data = models.JSONField()
++    class Meta:
++        app_label = 'my_app'
++
++def main():
++    from django.db import connection
++    with connection.cursor() as cursor:
++        cursor.execute("CREATE TABLE my_app_jsonfieldhaskeytest (id INTEGER PRIMARY KEY, data TEXT);")
++    
++    test2 = JsonFieldHasKeyTest(data=['bar', 'baz'])
++    test2.save()
++    
++    test3 = JsonFieldHasKeyTest(data={'0': 'bar'})
++    test3.save()
++    
++    for obj in JsonFieldHasKeyTest.objects.filter(data__has_key='0'):
++        print("matched:", obj.data)
++
++if __name__ == '__main__':
++    main()
+diff --git a/test_isnull_rewrite.py b/test_isnull_rewrite.py
+new file mode 100644
+index 0000000000..6586f3e973
+--- /dev/null
++++ b/test_isnull_rewrite.py
+@@ -0,0 +1,37 @@
++import django
++from django.conf import settings
++
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[],
++)
++django.setup()
++
++from django.db import models
++
++class JsonFieldHasKeyTest(models.Model):
++    data = models.JSONField()
++    class Meta:
++        app_label = 'my_app'
++
++def main():
++    from django.db import connection
++    with connection.cursor() as cursor:
++        cursor.execute("CREATE TABLE my_app_jsonfieldhaskeytest (id INTEGER PRIMARY KEY, data TEXT);")
++    
++    test2 = JsonFieldHasKeyTest(data={'1111': 'bar'})
++    test2.save()
++    
++    c1 = JsonFieldHasKeyTest.objects.filter(data__1111__isnull=False).count()
++    print("data__1111__isnull=False:", c1)
++    
++    c2 = JsonFieldHasKeyTest.objects.filter(data__1111__isnull=True).count()
++    print("data__1111__isnull=True:", c2)
++
++if __name__ == '__main__':
++    main()
+diff --git a/test_json_path.py b/test_json_path.py
+new file mode 100644
+index 0000000000..37936bf2e0
+--- /dev/null
++++ b/test_json_path.py
+@@ -0,0 +1,41 @@
++import django
++from django.conf import settings
++
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[],
++)
++django.setup()
++
++from django.db import models
++
++class JsonFieldHasKeyTest(models.Model):
++    data = models.JSONField()
++    class Meta:
++        app_label = 'my_app'
++
++def main():
++    from django.db import connection
++    with connection.cursor() as cursor:
++        cursor.execute("CREATE TABLE my_app_jsonfieldhaskeytest (id INTEGER PRIMARY KEY, data TEXT);")
++    
++    test = JsonFieldHasKeyTest(data={'foo': 'bar'})
++    test2 = JsonFieldHasKeyTest(data={'1111': 'bar'})
++    test.save()
++    test2.save()
++    
++    c1 = JsonFieldHasKeyTest.objects.filter(data__has_key='foo').count()
++    c2 = JsonFieldHasKeyTest.objects.filter(data__has_key='1111').count()
++    print("c1:", c1)
++    print("c2:", c2)
++    
++    c3 = JsonFieldHasKeyTest.objects.filter(data__1111='bar').count()
++    print("c3 (data__1111):", c3)
++
++if __name__ == '__main__':
++    main()
+diff --git a/test_json_path_compile.py b/test_json_path_compile.py
+new file mode 100644
+index 0000000000..9176df4be1
+--- /dev/null
++++ b/test_json_path_compile.py
+@@ -0,0 +1,9 @@
++import django
++from django.conf import settings
++settings.configure(INSTALLED_APPS=[])
++django.setup()
++from django.db.models.fields.json import KeyTransform
++
++kt = KeyTransform('1111', 'data')
++print("kt.key_name:", type(kt.key_name), repr(kt.key_name))
++
+diff --git a/test_json_path_compile2.py b/test_json_path_compile2.py
+new file mode 100644
+index 0000000000..8977c7a04c
+--- /dev/null
++++ b/test_json_path_compile2.py
+@@ -0,0 +1,6 @@
++import json
++from django.db.models.fields.json import compile_json_path
++
++print(compile_json_path(['foo'], include_root=False))
++print(compile_json_path(['1111'], include_root=False))
++
+diff --git a/test_json_path_compile3.py b/test_json_path_compile3.py
+new file mode 100644
+index 0000000000..d73527cd46
+--- /dev/null
++++ b/test_json_path_compile3.py
+@@ -0,0 +1,39 @@
++import django
++from django.conf import settings
++
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[],
++)
++django.setup()
++
++from django.db import models
++
++class JsonFieldHasKeyTest(models.Model):
++    data = models.JSONField()
++    class Meta:
++        app_label = 'my_app'
++
++def main():
++    from django.db import connection
++    with connection.cursor() as cursor:
++        cursor.execute("CREATE TABLE my_app_jsonfieldhaskeytest (id INTEGER PRIMARY KEY, data TEXT);")
++    
++    test2 = JsonFieldHasKeyTest(data={'1111': 'bar'})
++    test2.save()
++    
++    from django.db import connection
++    with connection.cursor() as cursor:
++        cursor.execute("SELECT JSON_TYPE(data, '$.\"1111\"') FROM my_app_jsonfieldhaskeytest;")
++        print("$.\"1111\":", cursor.fetchone()[0])
++        
++        cursor.execute("SELECT JSON_TYPE(data, '$[1111]') FROM my_app_jsonfieldhaskeytest;")
++        print("$[1111]:", cursor.fetchone()[0])
++
++if __name__ == '__main__':
++    main()
+diff --git a/test_json_path_int.py b/test_json_path_int.py
+new file mode 100644
+index 0000000000..faff5e16e0
+--- /dev/null
++++ b/test_json_path_int.py
+@@ -0,0 +1,35 @@
++import django
++from django.conf import settings
++import json
++
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[],
++)
++django.setup()
++
++from django.db import models
++
++class JsonFieldHasKeyTest(models.Model):
++    data = models.JSONField()
++    class Meta:
++        app_label = 'my_app'
++
++def main():
++    from django.db import connection
++    with connection.cursor() as cursor:
++        cursor.execute("CREATE TABLE my_app_jsonfieldhaskeytest (id INTEGER PRIMARY KEY, data TEXT);")
++    
++    test2 = JsonFieldHasKeyTest(data={'1111': 'bar'})
++    test2.save()
++    
++    c2 = JsonFieldHasKeyTest.objects.filter(data__has_key=1111).count()
++    print("c2 (int):", c2)
++
++if __name__ == '__main__':
++    main()

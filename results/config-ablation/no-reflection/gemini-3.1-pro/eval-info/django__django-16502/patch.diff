@@ -1,0 +1,207 @@
+diff --git a/django/core/servers/basehttp.py b/django/core/servers/basehttp.py
+index fef5532e58..9fc5f13386 100644
+--- a/django/core/servers/basehttp.py
++++ b/django/core/servers/basehttp.py
+@@ -128,6 +128,22 @@ class ServerHandler(simple_server.ServerHandler):
+             LimitedStream(stdin, content_length), stdout, stderr, environ, **kwargs
+         )
+ 
++    def write(self, data):
++        assert type(data) is bytes, "write() argument must be a bytes instance"
++        if not self.status:
++            raise AssertionError("write() before start_response()")
++        elif not self.headers_sent:
++            # Before the first output, send the stored headers
++            self.bytes_sent = len(data)  # make sure we know content-length
++            self.send_headers()
++        else:
++            self.bytes_sent += len(data)
++
++        # Send data to client if not a HEAD request
++        if self.environ.get("REQUEST_METHOD") != "HEAD":
++            self._write(data)
++            self._flush()
++
+     def cleanup_headers(self):
+         super().cleanup_headers()
+         # HTTP/1.1 requires support for persistent connections. Send 'close' if
+diff --git a/patch.py b/patch.py
+new file mode 100644
+index 0000000000..52ee893d1c
+--- /dev/null
++++ b/patch.py
+@@ -0,0 +1,43 @@
++import sys
++
++with open('django/core/servers/basehttp.py', 'r') as f:
++    content = f.read()
++
++replacement = """
++    def _write(self, data):
++        if self.environ.get("REQUEST_METHOD") != "HEAD":
++            super()._write(data)
++
++    def cleanup_headers(self):
++"""
++
++new_method = """
++    def setup(self):
++        super().setup()
++        self.request_handler.environ = self.environ
++
++    def write(self, data):
++        assert type(data) is bytes, "write() argument must be a bytes instance"
++        if not self.status:
++            raise AssertionError("write() before start_response()")
++        elif not self.headers_sent:
++            # Before the first output, send the stored headers
++            self.bytes_sent = len(data)  # make sure we know content-length
++            self.send_headers()
++        else:
++            self.bytes_sent += len(data)
++
++        # Send data to client if not a HEAD request
++        if self.environ.get("REQUEST_METHOD") != "HEAD":
++            self._write(data)
++            self._flush()
++
++    def cleanup_headers(self):
++"""
++
++new_content = content.replace(replacement, new_method)
++
++with open('django/core/servers/basehttp.py', 'w') as f:
++    f.write(new_content)
++
++print("Patched.")
+diff --git a/patch2.py b/patch2.py
+new file mode 100644
+index 0000000000..a72f164b1a
+--- /dev/null
++++ b/patch2.py
+@@ -0,0 +1,31 @@
++import sys
++
++with open('django/core/servers/basehttp.py', 'r') as f:
++    content = f.read()
++
++replacement = """
++    def setup(self):
++        super().setup()
++        self.request_handler.environ = self.environ
++
++    def write(self, data):
++"""
++
++new_method = """
++    def setup(self):
++        super().setup()
++        self.request_handler.environ = self.environ
++
++    def write(self, data):
++"""
++
++# wait, I will just do a clean replace:
++content = content.replace("""    def setup(self):
++        super().setup()
++        self.request_handler.environ = self.environ
++
++""", "")
++
++with open('django/core/servers/basehttp.py', 'w') as f:
++    f.write(content)
++
+diff --git a/repro.py b/repro.py
+new file mode 100644
+index 0000000000..2dd2ed0bae
+--- /dev/null
++++ b/repro.py
+@@ -0,0 +1,23 @@
++import sys
++from django.conf import settings
++from django.urls import path
++from django.http import HttpResponse
++
++settings.configure(
++    DEBUG=True,
++    ROOT_URLCONF=__name__,
++    SECRET_KEY='secret',
++    ALLOWED_HOSTS=['*'],
++    MIDDLEWARE=[],
++)
++
++def index(request):
++    return HttpResponse("This is a response body that shouldn't be sent on HEAD", content_type="text/plain")
++
++urlpatterns = [
++    path('', index),
++]
++
++if __name__ == '__main__':
++    from django.core.management import execute_from_command_line
++    execute_from_command_line(['manage.py', 'runserver', '127.0.0.1:8000', '--noreload'])
+diff --git a/repro2.py b/repro2.py
+new file mode 100644
+index 0000000000..eb104ea9ee
+--- /dev/null
++++ b/repro2.py
+@@ -0,0 +1,23 @@
++import sys
++from django.conf import settings
++from django.urls import path
++from django.http import HttpResponse
++
++settings.configure(
++    DEBUG=True,
++    ROOT_URLCONF=__name__,
++    SECRET_KEY='secret',
++    ALLOWED_HOSTS=['*'],
++    MIDDLEWARE=[],
++)
++
++def index(request):
++    return HttpResponse("", content_type="text/plain")
++
++urlpatterns = [
++    path('', index),
++]
++
++if __name__ == '__main__':
++    from django.core.management import execute_from_command_line
++    execute_from_command_line(['manage.py', 'runserver', '127.0.0.1:8000', '--noreload'])
+diff --git a/test_head.py b/test_head.py
+new file mode 100644
+index 0000000000..3b68c87772
+--- /dev/null
++++ b/test_head.py
+@@ -0,0 +1,30 @@
++from wsgiref.handlers import SimpleHandler
++from io import BytesIO
++
++class MockHandler(SimpleHandler):
++    def __init__(self):
++        self.stdin = BytesIO()
++        self.stdout = BytesIO()
++        self.stderr = BytesIO()
++        super().__init__(self.stdin, self.stdout, self.stderr, {'REQUEST_METHOD': 'HEAD', 'SERVER_PROTOCOL': 'HTTP/1.0'})
++
++    def finish_response(self):
++        if self.environ.get('REQUEST_METHOD') == 'HEAD':
++            try:
++                self.finish_content()
++            except:
++                if hasattr(self.result, 'close'):
++                    self.result.close()
++                raise
++            else:
++                self.close()
++        else:
++            super().finish_response()
++
++def app(environ, start_response):
++    start_response('200 OK', [('Content-Length', '10')])
++    return [b'0123456789']
++
++h = MockHandler()
++h.run(app)
++print(h.stdout.getvalue())
