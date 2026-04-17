@@ -1,0 +1,135 @@
+diff --git a/django/core/serializers/python.py b/django/core/serializers/python.py
+index 36048601af..5396e87a4a 100644
+--- a/django/core/serializers/python.py
++++ b/django/core/serializers/python.py
+@@ -79,7 +79,7 @@ class Serializer(base.Serializer):
+                     return self._value_from_field(value, value._meta.pk)
+ 
+                 def queryset_iterator(obj, field):
+-                    return getattr(obj, field.name).only("pk").iterator()
++                    return getattr(obj, field.name).only("pk").select_related(None).iterator()
+ 
+             m2m_iter = getattr(obj, "_prefetched_objects_cache", {}).get(
+                 field.name,
+diff --git a/django/core/serializers/xml_serializer.py b/django/core/serializers/xml_serializer.py
+index 1d3269c41a..0fffabb5c3 100644
+--- a/django/core/serializers/xml_serializer.py
++++ b/django/core/serializers/xml_serializer.py
+@@ -155,7 +155,7 @@ class Serializer(base.Serializer):
+                     self.xml.addQuickElement("object", attrs={"pk": str(value.pk)})
+ 
+                 def queryset_iterator(obj, field):
+-                    return getattr(obj, field.name).only("pk").iterator()
++                    return getattr(obj, field.name).only("pk").select_related(None).iterator()
+ 
+             m2m_iter = getattr(obj, "_prefetched_objects_cache", {}).get(
+                 field.name,
+diff --git a/editor.py b/editor.py
+new file mode 100644
+index 0000000000..0242fefdb3
+--- /dev/null
++++ b/editor.py
+@@ -0,0 +1,19 @@
++import sys
++import os
++
++def edit_file(filename, search_text, replace_text):
++    with open(filename, 'r') as f:
++        content = f.read()
++    if search_text not in content:
++        print(f"Error: search_text not found in {filename}")
++        sys.exit(1)
++    new_content = content.replace(search_text, replace_text)
++    with open(filename, 'w') as f:
++        f.write(new_content)
++    print(f"Successfully edited {filename}")
++
++if __name__ == "__main__":
++    if len(sys.argv) != 4:
++        print("Usage: python editor.py <filename> <search_text> <replace_text>")
++        sys.exit(1)
++    edit_file(sys.argv[1], sys.argv[2], sys.argv[3])
+diff --git a/repro_app/__init__.py b/repro_app/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..0e144a983d
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,75 @@
++import os
++import sys
++import django
++from django.conf import settings
++from django.db import models
++from django.core import serializers
++from django.db.models import Manager
++
++# Create a dummy app directory
++os.makedirs('repro_app', exist_ok=True)
++with open('repro_app/__init__.py', 'w') as f:
++    f.write('')
++
++# Configure Django
++if not settings.configured:
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'repro_app',
++        ],
++    )
++
++django.setup()
++
++# Define models
++class TestTagMaster(models.Model):
++    name = models.CharField(max_length=120)
++    class Meta:
++        app_label = 'repro_app'
++
++class TestTagManager(Manager):
++    def get_queryset(self):
++        qs = super().get_queryset()
++        qs = qs.select_related("master") # follow master when retrieving object by default
++        return qs
++
++class TestTag(models.Model):
++    objects = TestTagManager()
++    name = models.CharField(max_length=120)
++    master = models.ForeignKey(TestTagMaster, on_delete=models.SET_NULL, null=True)
++    class Meta:
++        app_label = 'repro_app'
++
++class Test(models.Model):
++    name = models.CharField(max_length=120)
++    tags = models.ManyToManyField(TestTag, blank=True)
++    class Meta:
++        app_label = 'repro_app'
++
++# Create tables
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(TestTagMaster)
++    schema_editor.create_model(TestTag)
++    schema_editor.create_model(Test)
++
++# Reproduce the issue
++try:
++    tag_master = TestTagMaster.objects.create(name="master")
++    tag = TestTag.objects.create(name="tag", master=tag_master)
++    test = Test.objects.create(name="test")
++    test.tags.add(tag)
++
++    print("Attempting serialization...")
++    data = serializers.serialize("json", [test])
++    print("Serialization successful")
++    print(data)
++except Exception as e:
++    import traceback
++    traceback.print_exc()

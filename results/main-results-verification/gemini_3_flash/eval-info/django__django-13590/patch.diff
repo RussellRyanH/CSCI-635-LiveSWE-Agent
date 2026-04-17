@@ -1,0 +1,250 @@
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index 4648daf395..405e67f311 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -1077,10 +1077,13 @@ class Query(BaseExpression):
+         elif isinstance(value, (list, tuple)):
+             # The items of the iterable may be expressions and therefore need
+             # to be resolved independently.
+-            return type(value)(
++            resolved_values = [
+                 self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
+                 for sub_value in value
+-            )
++            ]
++            if isinstance(value, tuple) and hasattr(value, '_fields'):
++                return type(value)(*resolved_values)
++            return type(value)(resolved_values)
+         return value
+ 
+     def solve_lookup_type(self, lookup):
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..9c9665c159
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,48 @@
++import django
++from django.conf import settings
++from collections import namedtuple
++
++# Setup Django environment
++if not settings.configured:
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++        ],
++    )
++    django.setup()
++
++from django.db import models
++from django.db.models.sql.query import Query
++
++# Define a simple model
++class RangeModel(models.Model):
++    value = models.IntegerField()
++
++    class Meta:
++        app_label = 'reproduce_app'
++
++# Mocking Query and call resolve_lookup_value
++query = Query(RangeModel)
++Point = namedtuple('Point', ['near', 'far'])
++p = Point(near=1, far=10)
++
++try:
++    print(f"Original: {p}, Type: {type(p)}")
++    # This should fail if the issue exists
++    resolved = query.resolve_lookup_value(p, can_reuse=None, allow_joins=True)
++    print(f"Resolved: {resolved}, Type: {type(resolved)}")
++except TypeError as e:
++    import traceback
++    traceback.print_exc()
++    print(f"Caught expected error: {e}")
++except Exception as e:
++    import traceback
++    traceback.print_exc()
++    print(f"Caught unexpected error: {e}")
++
+diff --git a/reproduce_issue_expression.py b/reproduce_issue_expression.py
+new file mode 100644
+index 0000000000..f31977c2b5
+--- /dev/null
++++ b/reproduce_issue_expression.py
+@@ -0,0 +1,46 @@
++import django
++from django.conf import settings
++from collections import namedtuple
++
++# Setup Django environment
++if not settings.configured:
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++        ],
++    )
++    django.setup()
++
++from django.db import models
++from django.db.models.sql.query import Query
++from django.db.models import F
++
++# Define a simple model
++class RangeModel(models.Model):
++    value = models.IntegerField()
++
++    class Meta:
++        app_label = 'reproduce_app'
++
++# Mocking Query and call resolve_lookup_value
++query = Query(RangeModel)
++Point = namedtuple('Point', ['near', 'far'])
++p = Point(near=F('near_val'), far=10)
++
++try:
++    print(f"Original: {p}")
++    # This should resolve the F expression and keep it a Point
++    resolved = query.resolve_lookup_value(p, can_reuse=None, allow_joins=True)
++    print(f"Resolved: {resolved}, Type: {type(resolved)}")
++    assert isinstance(resolved, Point)
++    assert not isinstance(resolved.near, F) # F expression should be resolved to something else (ResolvedOuterRef or similar)
++except Exception as e:
++    import traceback
++    traceback.print_exc()
++    print(f"Caught unexpected error: {e}")
+diff --git a/reproduce_issue_list.py b/reproduce_issue_list.py
+new file mode 100644
+index 0000000000..99794d90f3
+--- /dev/null
++++ b/reproduce_issue_list.py
+@@ -0,0 +1,43 @@
++import django
++from django.conf import settings
++from collections import namedtuple
++
++# Setup Django environment
++if not settings.configured:
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++        ],
++    )
++    django.setup()
++
++from django.db import models
++from django.db.models.sql.query import Query
++
++# Define a simple model
++class RangeModel(models.Model):
++    value = models.IntegerField()
++
++    class Meta:
++        app_label = 'reproduce_app'
++
++# Mocking Query and call resolve_lookup_value
++query = Query(RangeModel)
++
++l = [1, 2, 3]
++try:
++    print(f"Original: {l}, Type: {type(l)}")
++    # This should still work
++    resolved = query.resolve_lookup_value(l, can_reuse=None, allow_joins=True)
++    print(f"Resolved: {resolved}, Type: {type(resolved)}")
++except Exception as e:
++    import traceback
++    traceback.print_exc()
++    print(f"Caught unexpected error: {e}")
++
+diff --git a/reproduce_issue_tuple.py b/reproduce_issue_tuple.py
+new file mode 100644
+index 0000000000..67165ac18f
+--- /dev/null
++++ b/reproduce_issue_tuple.py
+@@ -0,0 +1,42 @@
++import django
++from django.conf import settings
++
++# Setup Django environment
++if not settings.configured:
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[
++            'django.contrib.contenttypes',
++        ],
++    )
++    django.setup()
++
++from django.db import models
++from django.db.models.sql.query import Query
++
++# Define a simple model
++class RangeModel(models.Model):
++    value = models.IntegerField()
++
++    class Meta:
++        app_label = 'reproduce_app'
++
++# Mocking Query and call resolve_lookup_value
++query = Query(RangeModel)
++
++t = (1, 2, 3)
++try:
++    print(f"Original: {t}, Type: {type(t)}")
++    # This should still work
++    resolved = query.resolve_lookup_value(t, can_reuse=None, allow_joins=True)
++    print(f"Resolved: {resolved}, Type: {type(resolved)}")
++except Exception as e:
++    import traceback
++    traceback.print_exc()
++    print(f"Caught unexpected error: {e}")
++
+diff --git a/test_nt.py b/test_nt.py
+new file mode 100644
+index 0000000000..c58062a8a6
+--- /dev/null
++++ b/test_nt.py
+@@ -0,0 +1,21 @@
++from collections import namedtuple
++Point = namedtuple('Point', ['near', 'far'])
++p = Point(1, 10)
++l = [1, 2]
++t = (1, 2)
++
++def reconstruct(v):
++    resolved = [i for i in v]
++    try:
++        print(f"Type: {type(v).__name__}")
++        if isinstance(v, tuple) and hasattr(v, '_fields'):
++            res = type(v)(*resolved)
++        else:
++            res = type(v)(resolved)
++        print(f"  Success: {res}")
++    except Exception as e:
++        print(f"  Failure: {e}")
++
++reconstruct(p)
++reconstruct(l)
++reconstruct(t)

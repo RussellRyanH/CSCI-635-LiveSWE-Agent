@@ -1,0 +1,121 @@
+diff --git a/edit_file.py b/edit_file.py
+new file mode 100644
+index 000000000..39ce71721
+--- /dev/null
++++ b/edit_file.py
+@@ -0,0 +1,21 @@
++import sys
++
++def edit_file(filename, search_text, replace_text):
++    with open(filename, 'r') as f:
++        content = f.read()
++    
++    if search_text not in content:
++        print(f"Error: search_text not found in {filename}")
++        sys.exit(1)
++    
++    new_content = content.replace(search_text, replace_text)
++    
++    with open(filename, 'w') as f:
++        f.write(new_content)
++    print(f"Successfully updated {filename}")
++
++if __name__ == "__main__":
++    if len(sys.argv) != 4:
++        print("Usage: python edit_file.py <filename> <search_text> <replace_text>")
++        sys.exit(1)
++    edit_file(sys.argv[1], sys.argv[2], sys.argv[3])
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 000000000..eb142931d
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,70 @@
++import numpy as np
++from sklearn import preprocessing, linear_model, utils
++import sklearn
++
++def ovr_approach(decision_function):
++    probs = 1. / (1. + np.exp(-decision_function))
++    probs = probs / probs.sum(axis=1).reshape((probs.shape[0], -1))
++    return probs
++
++def score_from_probs(probs, y_bin):
++    return (y_bin*np.log(probs)).sum(axis=1).mean()
++    
++np.random.seed(seed=1234)
++
++samples  = 200
++features = 5
++folds    = 10
++
++# Use a "probabilistic" scorer
++scorer = 'neg_log_loss'
++
++x = np.random.random(size=(samples, features))
++y = np.random.choice(['a', 'b', 'c'], size=samples)
++
++test  = np.random.choice(range(samples), size=int(samples/float(folds)), replace=False)
++train = [idx for idx in range(samples) if idx not in test]
++
++# Binarize the labels for y[test]
++lb = preprocessing.LabelBinarizer()
++lb.fit(y[test])
++y_bin = lb.transform(y[test])
++
++# What does _log_reg_scoring_path give us for the score?
++# In newer sklearn, _log_reg_scoring_path might have moved or changed. 
++# Based on the PR it is in sklearn.linear_model.logistic or sklearn.linear_model._logistic
++try:
++    from sklearn.linear_model._logistic import _log_reg_scoring_path
++except ImportError:
++    from sklearn.linear_model.logistic import _log_reg_scoring_path
++
++coefs, _, scores, _ = _log_reg_scoring_path(x, y, train, test, fit_intercept=True, scoring=scorer, multi_class='multinomial')
++
++# Choose a single C to look at, for simplicity
++c_index = 0
++coefs_single = coefs[c_index]
++scores_single = scores[c_index]
++
++# Initialise a LogisticRegression() instance
++existing_log_reg = linear_model.LogisticRegression(fit_intercept=True)
++existing_log_reg.coef_      = coefs_single[:, :-1]
++existing_log_reg.intercept_ = coefs_single[:, -1]
++existing_log_reg.classes_ = lb.classes_
++
++existing_dec_fn = existing_log_reg.decision_function(x[test])
++existing_probs_ovr = ovr_approach(existing_dec_fn)
++existing_probs_multi = utils.extmath.softmax(existing_dec_fn)
++
++print('score returned by _log_reg_scoring_path:', scores_single)
++score_ovr = score_from_probs(existing_probs_ovr, y_bin)
++print('score calculated via OvR method:', score_ovr)
++score_multi = score_from_probs(existing_probs_multi, y_bin)
++print('score calculated via multinomial method:', score_multi)
++
++if np.isclose(scores_single, score_ovr) and not np.isclose(scores_single, score_multi):
++    print("reproduced: _log_reg_scoring_path used OvR instead of multinomial")
++elif np.isclose(scores_single, score_multi):
++    print("Issue not reproduced: _log_reg_scoring_path used multinomial")
++else:
++    print("Unexpected result")
++
+diff --git a/sklearn/linear_model/logistic.py b/sklearn/linear_model/logistic.py
+index e4ea696ce..b1539ddca 100644
+--- a/sklearn/linear_model/logistic.py
++++ b/sklearn/linear_model/logistic.py
+@@ -922,7 +922,12 @@ def _log_reg_scoring_path(X, y, train, test, pos_class=None, Cs=10,
+         check_input=False, max_squared_sum=max_squared_sum,
+         sample_weight=sample_weight)
+ 
+-    log_reg = LogisticRegression(fit_intercept=fit_intercept)
++    log_reg = LogisticRegression(fit_intercept=fit_intercept, solver=solver,
++                                 multi_class=multi_class,
++                                 intercept_scaling=intercept_scaling,
++                                 random_state=random_state,
++                                 max_iter=max_iter, tol=tol,
++                                 penalty=penalty, dual=dual)
+ 
+     # The score method of Logistic Regression has a classes_ attribute.
+     if multi_class == 'ovr':

@@ -1,0 +1,214 @@
+diff --git a/editor.py b/editor.py
+new file mode 100644
+index 00000000..0ac865e9
+--- /dev/null
++++ b/editor.py
+@@ -0,0 +1,26 @@
++import sys
++
++def main():
++    if len(sys.argv) < 4:
++        print("Usage: python editor.py <filename> <search_string> <replacement_string>")
++        sys.exit(1)
++
++    filename = sys.argv[1]
++    search_string = sys.argv[2]
++    replacement_string = sys.argv[3]
++
++    with open(filename, 'r') as f:
++        content = f.read()
++
++    if search_string not in content:
++        print(f"Error: search_string not found in {filename}")
++        sys.exit(1)
++
++    new_content = content.replace(search_string, replacement_string)
++
++    with open(filename, 'w') as f:
++        f.write(new_content)
++    print(f"Successfully updated {filename}")
++
++if __name__ == "__main__":
++    main()
+diff --git a/reproduction.py b/reproduction.py
+new file mode 100644
+index 00000000..686869f5
+--- /dev/null
++++ b/reproduction.py
+@@ -0,0 +1,26 @@
++import matplotlib.pyplot as plt
++import seaborn.objects as so
++import pandas as pd
++
++data = pd.DataFrame({"x": ["A", "B", "C"], "y": [1, 3, 2]})
++
++# Test 1: Check margins for Nominal scale
++p1 = so.Plot(data, x="x", y="y").add(so.Bar()).scale(x=so.Nominal())
++fig1 = p1.plot()._figure
++ax1 = fig1.axes[0]
++xlim = ax1.get_xlim()
++print(f"X-axis limits for Nominal scale: {xlim}")
++# Expected for categorical in seaborn: (-0.5, 2.5) for 3 categories
++# Current behavior: probably (0, 2) with margins
++
++# Test 2: Check grid
++# Seaborn default style might have a grid. Let's see if it's visible.
++print(f"X-axis grid visible: {ax1.xaxis.get_gridlines()[0].get_visible() if ax1.xaxis.get_gridlines() else 'No gridlines'}")
++
++# Test 3: Check y-axis inversion for Nominal y
++p2 = so.Plot(data, x="y", y="x").add(so.Bar()).scale(y=so.Nominal())
++fig2 = p2.plot()._figure
++ax2 = fig2.axes[0]
++ylim = ax2.get_ylim()
++print(f"Y-axis limits for Nominal scale: {ylim}")
++# Expected for categorical: (2.5, -0.5) if inverted
+diff --git a/seaborn/_core/plot.py b/seaborn/_core/plot.py
+index 4f0290a4..b4c40da4 100644
+--- a/seaborn/_core/plot.py
++++ b/seaborn/_core/plot.py
+@@ -25,7 +25,7 @@ from seaborn._marks.base import Mark
+ from seaborn._stats.base import Stat
+ from seaborn._core.data import PlotData
+ from seaborn._core.moves import Move
+-from seaborn._core.scales import Scale
++from seaborn._core.scales import Scale, Nominal
+ from seaborn._core.subplots import Subplots
+ from seaborn._core.groupby import GroupBy
+ from seaborn._core.properties import PROPERTIES, Property
+@@ -1475,7 +1475,7 @@ class Plotter:
+ 
+                 axes_df = self._filter_subplot_data(df, view)
+ 
+-                with pd.option_context("mode.use_inf_as_null", True):
++                with pd.option_context("mode.use_inf_as_na", True):
+                     if keep_na:
+                         # The simpler thing to do would be x.dropna().reindex(x.index).
+                         # But that doesn't work with the way that the subset iteration
+@@ -1632,6 +1632,22 @@ class Plotter:
+             for axis in "xy":
+                 axis_key = sub[axis]
+ 
++                # Special handling for nominal scales
++                if isinstance(self._scales.get(axis_key), Nominal):
++                    # 1. Set margins to +/- 0.5 from the first and last ticks
++                    # Note: we do this before inversion so we can use the original ticks
++                    axis_obj = getattr(ax, f"{axis}axis")
++                    n = len(axis_obj.get_majorticklocs())
++                    if n:
++                        ax.set(**{f"{axis}lim": (-0.5, n - 0.5)})
++
++                    # 2. Disable grid
++                    axis_obj.grid(False)
++
++                    # 3. Invert y-axis
++                    if axis == "y":
++                        ax.invert_yaxis()
++
+                 # Axis limits
+                 if axis_key in p._limits:
+                     convert_units = getattr(ax, f"{axis}axis").convert_units
+diff --git a/test_cases.py b/test_cases.py
+new file mode 100644
+index 00000000..21755443
+--- /dev/null
++++ b/test_cases.py
+@@ -0,0 +1,36 @@
++import matplotlib.pyplot as plt
++import seaborn.objects as so
++import pandas as pd
++import numpy as np
++
++# Test 1: Single category
++data1 = pd.DataFrame({"x": ["A"], "y": [1]})
++p1 = so.Plot(data1, x="x", y="y").add(so.Bar())
++fig1 = p1.plot()._figure
++ax1 = fig1.axes[0]
++print(f"1 category xlim: {ax1.get_xlim()}")
++
++# Test 2: Multiple categories
++data2 = pd.DataFrame({"x": ["A", "B", "C"], "y": [1, 2, 3]})
++p2 = so.Plot(data2, x="x", y="y").add(so.Bar())
++fig2 = p2.plot()._figure
++ax2 = fig2.axes[0]
++print(f"3 categories xlim: {ax2.get_xlim()}")
++
++# Test 3: Nominal on Y axis (should be inverted)
++p3 = so.Plot(data2, x="y", y="x").add(so.Bar())
++fig3 = p3.plot()._figure
++ax3 = fig3.axes[0]
++print(f"Nominal y-axis ylim (inverted): {ax3.get_ylim()}")
++
++# Test 4: Explicit limits should still work
++p4 = so.Plot(data2, x="x", y="y").add(so.Bar()).limit(x=("A", "B"))
++fig4 = p4.plot()._figure
++ax4 = fig4.axes[0]
++print(f"Explicit limits xlim: {ax4.get_xlim()}")
++
++# Test 5: Grid visibility
++# By default, seaborn objects uses a style with grids.
++# We want to make sure nominal axis has no grid but other axis might.
++print(f"Nominal x-axis grid: {any(l.get_visible() for l in ax2.xaxis.get_gridlines()) if ax2.xaxis.get_gridlines() else False}")
++print(f"Numeric y-axis grid: {any(l.get_visible() for l in ax2.yaxis.get_gridlines()) if ax2.yaxis.get_gridlines() else False}")
+diff --git a/test_margins.py b/test_margins.py
+new file mode 100644
+index 00000000..586302f9
+--- /dev/null
++++ b/test_margins.py
+@@ -0,0 +1,28 @@
++import matplotlib.pyplot as plt
++import seaborn.objects as so
++import pandas as pd
++import numpy as np
++
++data = pd.DataFrame({"x": ["A", "B", "C"], "y": [1, 3, 2]})
++
++# Test with 3 categories
++p1 = so.Plot(data, x="x", y="y").add(so.Bar()).scale(x=so.Nominal())
++fig1 = p1.plot()._figure
++ax1 = fig1.axes[0]
++xlim = ax1.get_xlim()
++print(f"X-axis limits for 3 categories: {xlim}")
++
++# Test with 1 category
++data2 = pd.DataFrame({"x": ["A"], "y": [1]})
++p2 = so.Plot(data2, x="x", y="y").add(so.Bar()).scale(x=so.Nominal())
++fig2 = p2.plot()._figure
++ax2 = fig2.axes[0]
++xlim2 = ax2.get_xlim()
++print(f"X-axis limits for 1 category: {xlim2}")
++
++# Test with explicit limits
++p3 = so.Plot(data, x="x", y="y").add(so.Bar()).scale(x=so.Nominal()).limit(x=("A", "C"))
++fig3 = p3.plot()._figure
++ax3 = fig3.axes[0]
++xlim3 = ax3.get_xlim()
++print(f"X-axis limits with explicit limit: {xlim3}")
+diff --git a/test_sticky.py b/test_sticky.py
+new file mode 100644
+index 00000000..1e9f13a9
+--- /dev/null
++++ b/test_sticky.py
+@@ -0,0 +1,23 @@
++import matplotlib.pyplot as plt
++from matplotlib.artist import Artist
++import numpy as np
++
++class Sticky(Artist):
++    def __init__(self, x_edges=None, y_edges=None):
++        super().__init__()
++        self.sticky_edges.x[:] = x_edges or []
++        self.sticky_edges.y[:] = y_edges or []
++
++fig, ax = plt.subplots()
++ax.plot([0, 1, 2], [0, 0, 0])
++ax.add_artist(Sticky(x_edges=[-0.5, 2.5]))
++ax.margins(x=0)
++ax.autoscale_view()
++print(f"Limits with sticky [-0.5, 2.5]: {ax.get_xlim()}")
++
++fig, ax = plt.subplots()
++ax.plot([0], [0])
++ax.add_artist(Sticky(x_edges=[-0.5, 0.5]))
++ax.margins(x=0)
++ax.autoscale_view()
++print(f"Limits with single point 0 and sticky [-0.5, 0.5]: {ax.get_xlim()}")
