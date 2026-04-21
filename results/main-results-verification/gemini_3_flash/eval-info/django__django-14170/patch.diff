@@ -1,0 +1,186 @@
+diff --git a/check_other_lookups.py b/check_other_lookups.py
+new file mode 100644
+index 0000000000..cc9a88c692
+--- /dev/null
++++ b/check_other_lookups.py
+@@ -0,0 +1,26 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++
++if not settings.configured:
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=['reproduce_app'],
++    )
++    django.setup()
++
++from reproduce_app.models import DTModel
++
++# Check year lookup
++print("Year lookup (should use BETWEEN):")
++print(DTModel.objects.filter(start_date__year=2020).only('id').query)
++
++# Check month lookup (should NOT use YearLookup)
++print("\nMonth lookup:")
++print(DTModel.objects.filter(start_date__month=1).only('id').query)
+diff --git a/django/db/models/lookups.py b/django/db/models/lookups.py
+index 916478d075..079450c68c 100644
+--- a/django/db/models/lookups.py
++++ b/django/db/models/lookups.py
+@@ -58,7 +58,7 @@ class Lookup:
+         return sqls, sqls_params
+ 
+     def get_source_expressions(self):
+-        if self.rhs_is_direct_value():
++        if self.rhs_is_direct_value() and self.lhs.lookup_name != "iso_year":
+             return [self.lhs]
+         return [self.lhs, self.rhs]
+ 
+@@ -87,7 +87,7 @@ class Lookup:
+     def process_rhs(self, compiler, connection):
+         value = self.rhs
+         if self.bilateral_transforms:
+-            if self.rhs_is_direct_value():
++            if self.rhs_is_direct_value() and self.lhs.lookup_name != "iso_year":
+                 # Do not call get_db_prep_lookup here as the value will be
+                 # transformed before being used for lookup
+                 value = Value(value, output_field=self.lhs.output_field)
+@@ -240,7 +240,7 @@ class FieldGetDbPrepValueIterableMixin(FieldGetDbPrepValueMixin):
+         return prepared_values
+ 
+     def process_rhs(self, compiler, connection):
+-        if self.rhs_is_direct_value():
++        if self.rhs_is_direct_value() and self.lhs.lookup_name != "iso_year":
+             # rhs should be an iterable of values. Use batch_process_rhs()
+             # to prepare/transform those values.
+             return self.batch_process_rhs(compiler, connection)
+@@ -378,7 +378,7 @@ class In(FieldGetDbPrepValueIterableMixin, BuiltinLookup):
+                 "the inner query to be evaluated using `list(inner_query)`."
+             )
+ 
+-        if self.rhs_is_direct_value():
++        if self.rhs_is_direct_value() and self.lhs.lookup_name != "iso_year":
+             # Remove None from the list as NULL is never equal to anything.
+             try:
+                 rhs = OrderedSet(self.rhs)
+@@ -549,7 +549,7 @@ class YearLookup(Lookup):
+     def as_sql(self, compiler, connection):
+         # Avoid the extract operation if the rhs is a direct value to allow
+         # indexes to be used.
+-        if self.rhs_is_direct_value():
++        if self.rhs_is_direct_value() and self.lhs.lookup_name != "iso_year":
+             # Skip the extract part by directly using the originating field,
+             # that is self.lhs.lhs.
+             lhs_sql, params = self.process_lhs(compiler, connection, self.lhs.lhs)
+@@ -605,7 +605,7 @@ class UUIDTextMixin:
+     def process_rhs(self, qn, connection):
+         if not connection.features.has_native_uuid_field:
+             from django.db.models.functions import Replace
+-            if self.rhs_is_direct_value():
++            if self.rhs_is_direct_value() and self.lhs.lookup_name != "iso_year":
+                 self.rhs = Value(self.rhs)
+             self.rhs = Replace(self.rhs, Value('-'), Value(''), output_field=CharField())
+         rhs, params = super().process_rhs(qn, connection)
+diff --git a/edit_file.py b/edit_file.py
+new file mode 100644
+index 0000000000..6fcd527b49
+--- /dev/null
++++ b/edit_file.py
+@@ -0,0 +1,26 @@
++import sys
++
++def main():
++    if len(sys.argv) < 3:
++        print("Usage: python edit_file.py <filename> <search_string> <replacement_string>")
++        sys.exit(1)
++    
++    filename = sys.argv[1]
++    search_string = sys.argv[2]
++    replacement_string = sys.argv[3]
++    
++    with open(filename, 'r') as f:
++        content = f.read()
++    
++    if search_string not in content:
++        print(f"Error: search string not found in {filename}")
++        sys.exit(1)
++        
++    new_content = content.replace(search_string, replacement_string)
++    
++    with open(filename, 'w') as f:
++        f.write(new_content)
++    print(f"Successfully edited {filename}")
++
++if __name__ == "__main__":
++    main()
+diff --git a/reproduce_app/__init__.py b/reproduce_app/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/reproduce_app/models.py b/reproduce_app/models.py
+new file mode 100644
+index 0000000000..7cafd7c0cb
+--- /dev/null
++++ b/reproduce_app/models.py
+@@ -0,0 +1,3 @@
++from django.db import models
++class DTModel(models.Model):
++    start_date = models.DateField()
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..28061ed606
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,46 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models.functions import ExtractIsoYear
++
++if not settings.configured:
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=['reproduce_app'],
++    )
++    django.setup()
++
++from reproduce_app.models import DTModel
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(DTModel)
++
++# Test annotation
++qs = DTModel.objects.annotate(extracted=ExtractIsoYear('start_date')).only('id')
++print("Annotation query:")
++print(qs.query)
++
++# Test filter with annotation
++filter_qs = qs.filter(extracted=2020)
++print("\nFilter with annotation query:")
++print(filter_qs.query)
++
++# Test implicit lookup
++lookup_qs = DTModel.objects.filter(start_date__iso_year=2020).only('id')
++print("\nImplicit lookup query:")
++print(lookup_qs.query)
++
++# Check if BETWEEN is used (it shouldn't be for iso_year)
++query_str = str(lookup_qs.query)
++if "BETWEEN" in query_str:
++    print("\nISSUE REPRODUCED: BETWEEN used for iso_year lookup")
++else:
++    print("\nISSUE NOT REPRODUCED: BETWEEN not used for iso_year lookup")

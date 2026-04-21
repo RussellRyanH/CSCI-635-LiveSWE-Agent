@@ -1,0 +1,487 @@
+diff --git a/check_wsgiref.py b/check_wsgiref.py
+new file mode 100644
+index 0000000000..7967904349
+--- /dev/null
++++ b/check_wsgiref.py
+@@ -0,0 +1,26 @@
++from wsgiref.simple_server import make_server
++import http.client
++import threading
++import time
++
++def app(environ, start_response):
++    start_response('200 OK', [('Content-Type', 'text/plain'), ('Content-Length', '5')])
++    return [b"Hello"]
++
++def run_server():
++    httpd = make_server('127.0.0.1', 8002, app)
++    httpd.handle_request()
++
++t = threading.Thread(target=run_server)
++t.daemon = True
++t.start()
++time.sleep(1)
++
++conn = http.client.HTTPConnection("127.0.0.1", 8002)
++conn.request("HEAD", "/")
++response = conn.getresponse()
++print(f"Status: {response.status}")
++body = response.read()
++print(f"Body length: {len(body)}")
++if body:
++    print(f"Body: {body}")
+diff --git a/debug_repro.py b/debug_repro.py
+new file mode 100644
+index 0000000000..521a13c8a1
+--- /dev/null
++++ b/debug_repro.py
+@@ -0,0 +1,53 @@
++import os
++import sys
++import threading
++import time
++import http.client
++from django.conf import settings
++from django.http import HttpResponse
++from django.urls import path
++from django.core.wsgi import get_wsgi_application
++from django.core.servers.basehttp import run, ServerHandler
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        ROOT_URLCONF=__name__,
++        SECRET_KEY='secret',
++        MIDDLEWARE=[],
++        INSTALLED_APPS=[],
++        DATABASES={},
++    )
++
++def index(request):
++    print(f"Request method: {request.method}")
++    return HttpResponse("This body should not be in HEAD response")
++
++urlpatterns = [
++    path('', index),
++]
++
++def run_server():
++    application = get_wsgi_application()
++    run('127.0.0.1', 8003, application)
++
++if __name__ == "__main__":
++    t = threading.Thread(target=run_server)
++    t.daemon = True
++    t.start()
++    time.sleep(2)
++    
++    print("Sending HEAD request...")
++    conn = http.client.HTTPConnection("127.0.0.1", 8003)
++    conn.request("HEAD", "/")
++    response = conn.getresponse()
++    
++    print(f"Status: {response.status}")
++    body = response.read()
++    print(f"Body length: {len(body)}")
++    if body:
++        print(f"Body: {body.decode('utf-8')}")
++    
++    # Keep it alive for a bit to see output
++    time.sleep(1)
+diff --git a/debug_repro_v2.py b/debug_repro_v2.py
+new file mode 100644
+index 0000000000..9c1ff1a085
+--- /dev/null
++++ b/debug_repro_v2.py
+@@ -0,0 +1,66 @@
++import os
++import sys
++import threading
++import time
++import http.client
++import socket
++from django.conf import settings
++from django.http import HttpResponse
++from django.urls import path
++from django.core.wsgi import get_wsgi_application
++from django.core.servers.basehttp import run, WSGIRequestHandler, ServerHandler
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        ROOT_URLCONF=__name__,
++        SECRET_KEY='secret',
++        MIDDLEWARE=[],
++        INSTALLED_APPS=[],
++        DATABASES={},
++    )
++
++def index(request):
++    return HttpResponse("This body should not be in HEAD response")
++
++urlpatterns = [
++    path('', index),
++]
++
++def run_server():
++    application = get_wsgi_application()
++    run('127.0.0.1', 8004, application)
++
++if __name__ == "__main__":
++    t = threading.Thread(target=run_server)
++    t.daemon = True
++    t.start()
++    time.sleep(2)
++    
++    print("Sending HEAD request via raw socket...")
++    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
++    s.connect(('127.0.0.1', 8004))
++    s.sendall(b"HEAD / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
++    
++    response = b""
++    while True:
++        data = s.recv(1024)
++        if not data:
++            break
++        response += data
++    s.close()
++    
++    print("Response received:")
++    print(response.decode('utf-8'))
++    
++    header_end = response.find(b"\r\n\r\n")
++    if header_end != -1:
++        body = response[header_end+4:]
++        if body:
++            print(f"FAILURE: Body found! Length: {len(body)}")
++            print(f"Body content: {body.decode('utf-8')}")
++        else:
++            print("SUCCESS: No body found.")
++    else:
++        print("Could not find end of headers")
+diff --git a/debug_repro_v3.py b/debug_repro_v3.py
+new file mode 100644
+index 0000000000..70b9af719e
+--- /dev/null
++++ b/debug_repro_v3.py
+@@ -0,0 +1,72 @@
++import os
++import sys
++import threading
++import time
++import http.client
++import socket
++from django.conf import settings
++from django.http import HttpResponse
++from django.urls import path
++from django.core.wsgi import get_wsgi_application
++from django.core.servers.basehttp import run, WSGIRequestHandler, ServerHandler
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        ROOT_URLCONF=__name__,
++        SECRET_KEY='secret',
++        MIDDLEWARE=[],
++        INSTALLED_APPS=[],
++        DATABASES={},
++    )
++
++def index(request):
++    return HttpResponse("This body should not be in HEAD response")
++
++urlpatterns = [
++    path('', index),
++]
++
++def run_server():
++    application = get_wsgi_application()
++    run('127.0.0.1', 8005, application)
++
++if __name__ == "__main__":
++    t = threading.Thread(target=run_server)
++    t.daemon = True
++    t.start()
++    time.sleep(2)
++    
++    print("Sending GET request via raw socket...")
++    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
++    s.connect(('127.0.0.1', 8005))
++    s.sendall(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
++    
++    response = b""
++    while True:
++        data = s.recv(1024)
++        if not data:
++            break
++        response += data
++        if b"\r\n\r\n" in response and len(response) > response.find(b"\r\n\r\n") + 4 + 39:
++            break
++    s.close()
++    
++    print("Response received:")
++    print(response.decode('utf-8'))
++    
++    header_end = response.find(b"\r\n\r\n")
++    if header_end != -1:
++        body = response[header_end+4:]
++        if body:
++            print(f"Body found! Length: {len(body)}")
++            print(f"Body content: {body.decode('utf-8')}")
++            if body.decode('utf-8') == "This body should not be in HEAD response":
++                print("SUCCESS: Body found in GET response as expected.")
++            else:
++                print("FAILURE: Body content mismatch.")
++        else:
++            print("FAILURE: No body found in GET response.")
++    else:
++        print("Could not find end of headers")
+diff --git a/debug_repro_v4.py b/debug_repro_v4.py
+new file mode 100644
+index 0000000000..8a2d19bfbb
+--- /dev/null
++++ b/debug_repro_v4.py
+@@ -0,0 +1,73 @@
++import os
++import sys
++import threading
++import time
++import http.client
++import socket
++from django.conf import settings
++from django.http import HttpResponse, StreamingHttpResponse
++from django.urls import path
++from django.core.wsgi import get_wsgi_application
++from django.core.servers.basehttp import run, WSGIRequestHandler, ServerHandler
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        ROOT_URLCONF=__name__,
++        SECRET_KEY='secret',
++        MIDDLEWARE=[],
++        INSTALLED_APPS=[],
++        DATABASES={},
++    )
++
++def stream_index(request):
++    def iter():
++        yield b"Part 1"
++        yield b"Part 2"
++    return StreamingHttpResponse(iter())
++
++urlpatterns = [
++    path('', stream_index),
++]
++
++def run_server():
++    application = get_wsgi_application()
++    run('127.0.0.1', 8006, application)
++
++if __name__ == "__main__":
++    t = threading.Thread(target=run_server)
++    t.daemon = True
++    t.start()
++    time.sleep(2)
++    
++    print("Sending HEAD request to streaming response...")
++    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
++    s.connect(('127.0.0.1', 8006))
++    s.sendall(b"HEAD / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
++    
++    response = b""
++    while True:
++        s.settimeout(2)
++        try:
++            data = s.recv(1024)
++            if not data:
++                break
++            response += data
++        except socket.timeout:
++            break
++    s.close()
++    
++    print("Response received:")
++    print(response.decode('utf-8'))
++    
++    header_end = response.find(b"\r\n\r\n")
++    if header_end != -1:
++        body = response[header_end+4:]
++        if body:
++            print(f"FAILURE: Body found! Length: {len(body)}")
++            print(f"Body content: {body.decode('utf-8')}")
++        else:
++            print("SUCCESS: No body found.")
++    else:
++        print("Could not find end of headers")
+diff --git a/django/core/servers/basehttp.py b/django/core/servers/basehttp.py
+index fef5532e58..a02ee099ca 100644
+--- a/django/core/servers/basehttp.py
++++ b/django/core/servers/basehttp.py
+@@ -114,6 +114,7 @@ class ServerHandler(simple_server.ServerHandler):
+     http_version = "1.1"
+ 
+     def __init__(self, stdin, stdout, stderr, environ, **kwargs):
++        self.request_method = environ["REQUEST_METHOD"]
+         """
+         Use a LimitedStream so that unread request data will be ignored at
+         the end of the request. WSGIRequest uses a LimitedStream but it
+@@ -143,6 +144,15 @@ class ServerHandler(simple_server.ServerHandler):
+         if self.headers.get("Connection") == "close":
+             self.request_handler.close_connection = True
+ 
++    def finish_response(self):
++        if self.request_method == "HEAD":
++            try:
++                self.send_headers()
++            finally:
++                self.close()
++            return
++        super().finish_response()
++
+     def close(self):
+         self.get_stdin().read()
+         super().close()
+diff --git a/edit_file.py b/edit_file.py
+new file mode 100644
+index 0000000000..abe2b8b3b5
+--- /dev/null
++++ b/edit_file.py
+@@ -0,0 +1,26 @@
++import sys
++
++def main():
++    if len(sys.argv) < 3:
++        print("Usage: python edit_file.py <filename> <search_string> <replace_string>")
++        sys.exit(1)
++    
++    filename = sys.argv[1]
++    search_string = sys.argv[2]
++    replace_string = sys.argv[3]
++    
++    with open(filename, 'r') as f:
++        content = f.read()
++    
++    if search_string not in content:
++        print(f"Error: search_string not found in {filename}")
++        sys.exit(1)
++        
++    new_content = content.replace(search_string, replace_string)
++    
++    with open(filename, 'w') as f:
++        f.write(new_content)
++    print(f"Successfully updated {filename}")
++
++if __name__ == "__main__":
++    main()
+diff --git a/edit_file_complex.py b/edit_file_complex.py
+new file mode 100644
+index 0000000000..fa4f489aac
+--- /dev/null
++++ b/edit_file_complex.py
+@@ -0,0 +1,26 @@
++import sys
++
++def main():
++    if len(sys.argv) < 3:
++        print("Usage: python edit_file_complex.py <filename> <search_string> <replace_string>")
++        sys.exit(1)
++    
++    filename = sys.argv[1]
++    search_string = sys.argv[2]
++    replace_string = sys.argv[3]
++    
++    with open(filename, 'r') as f:
++        content = f.read()
++    
++    if search_string not in content:
++        print(f"Error: search_string not found in {filename}")
++        sys.exit(1)
++        
++    new_content = content.replace(search_string, replace_string)
++    
++    with open(filename, 'w') as f:
++        f.write(new_content)
++    print(f"Successfully updated {filename}")
++
++if __name__ == "__main__":
++    main()
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..d8603578fa
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,69 @@
++import os
++import sys
++import threading
++import time
++import http.client
++from django.conf import settings
++from django.http import HttpResponse
++from django.urls import path
++from django.core.wsgi import get_wsgi_application
++from django.core.servers.basehttp import run
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        ROOT_URLCONF=__name__,
++        SECRET_KEY='secret',
++        MIDDLEWARE=[],
++        INSTALLED_APPS=[],
++        DATABASES={},
++    )
++
++def index(request):
++    return HttpResponse("This body should not be in HEAD response")
++
++urlpatterns = [
++    path('', index),
++]
++
++def run_server():
++    # We need to make sure the app is loaded after settings are configured
++    application = get_wsgi_application()
++    try:
++        run('127.0.0.1', 8001, application)
++    except Exception as e:
++        print(f"Server error: {e}")
++
++if __name__ == "__main__":
++    # Start runserver in a thread
++    t = threading.Thread(target=run_server)
++    t.daemon = True
++    t.start()
++    
++    # Wait for server to start
++    time.sleep(2)
++    
++    # Make a HEAD request
++    try:
++        conn = http.client.HTTPConnection("127.0.0.1", 8001)
++        conn.request("HEAD", "/")
++        response = conn.getresponse()
++        
++        print(f"Status: {response.status}")
++        print("Headers:")
++        for header, value in response.getheaders():
++            print(f"  {header}: {value}")
++        
++        body = response.read()
++        print(f"Body length: {len(body)}")
++        if body:
++            print(f"Body: {body.decode('utf-8')}")
++            print("FAILURE: Body found in HEAD response")
++            sys.exit(1)
++        else:
++            print("SUCCESS: No body in HEAD response")
++            sys.exit(0)
++    except Exception as e:
++        print(f"Client error: {e}")
++        sys.exit(1)

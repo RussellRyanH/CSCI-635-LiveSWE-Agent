@@ -1,0 +1,251 @@
+diff --git a/fix.py b/fix.py
+new file mode 100644
+index 0000000000..12c7d9b858
+--- /dev/null
++++ b/fix.py
+@@ -0,0 +1,24 @@
++def _hermite_normal_form_new(A):
++    m, n = A.shape
++    A_rep = A.to_dense().rep.copy()
++    k = n
++    i = m - 1
++    while i >= 0 and k >= 1:
++        k -= 1
++        for j in range(k - 1, -1, -1):
++            if A_rep[i][j] != 0:
++                u, v, d = _gcdex(A_rep[i][k], A_rep[i][j])
++                r, s = A_rep[i][k] // d, A_rep[i][j] // d
++                add_columns(A_rep, k, j, u, v, -s, r)
++        b = A_rep[i][k]
++        if b < 0:
++            add_columns(A_rep, k, k, -1, 0, -1, 0)
++            b = -b
++        if b == 0:
++            k += 1
++        else:
++            for j in range(k + 1, n):
++                q = A_rep[i][j] // b
++                add_columns(A_rep, j, k, 1, -q, 0, 1)
++        i -= 1
++    return DomainMatrix.from_rep(A_rep)[:, k:]
+diff --git a/patch_hnf.py b/patch_hnf.py
+new file mode 100644
+index 0000000000..82e141f0cc
+--- /dev/null
++++ b/patch_hnf.py
+@@ -0,0 +1,121 @@
++import re
++
++with open("sympy/polys/matrices/normalforms.py", "r") as f:
++    content = f.read()
++
++# Replace the _hermite_normal_form implementation
++new_impl = """def _hermite_normal_form(A):
++    if not A.domain.is_ZZ:
++        raise DMDomainError('Matrix must be over domain ZZ.')
++    m, n = A.shape
++    A_rep = A.to_dense().rep.copy()
++    k = n
++    i = m - 1
++    while i >= 0 and k >= 1:
++        k -= 1
++        for j in range(k - 1, -1, -1):
++            if A_rep[i][j] != 0:
++                u, v, d = _gcdex(A_rep[i][k], A_rep[i][j])
++                r, s = A_rep[i][k] // d, A_rep[i][j] // d
++                add_columns(A_rep, k, j, u, v, -s, r)
++        b = A_rep[i][k]
++        if b < 0:
++            add_columns(A_rep, k, k, -1, 0, -1, 0)
++            b = -b
++        if b == 0:
++            k += 1
++        else:
++            for j in range(k + 1, n):
++                q = A_rep[i][j] // b
++                add_columns(A_rep, j, k, 1, -q, 0, 1)
++        i -= 1
++    return DomainMatrix.from_rep(A_rep)[:, k:]"""
++
++# We need to replace the body of _hermite_normal_form(A) up to _hermite_normal_form_modulo_D
++# Let's use regex
++pattern = re.compile(r"def _hermite_normal_form\(A\):.*?return DomainMatrix\.from_rep\(A\)\[:, k:\]", re.DOTALL)
++match = pattern.search(content)
++
++# To preserve docstrings, we'll just replace the logic part
++logic_pattern = re.compile(r"    if not A\.domain\.is_ZZ:.*?(?=def _hermite_normal_form_modulo_D)", re.DOTALL)
++
++old_logic = """    if not A.domain.is_ZZ:
++        raise DMDomainError('Matrix must be over domain ZZ.')
++    # We work one row at a time, starting from the bottom row, and working our
++    # way up. The total number of rows we will consider is min(m, n), where
++    # A is an m x n matrix.
++    m, n = A.shape
++    rows = min(m, n)
++    A = A.to_dense().rep.copy()
++    # Our goal is to put pivot entries in the rightmost columns.
++    # Invariant: Before processing each row, k should be the index of the
++    # leftmost column in which we have so far put a pivot.
++    k = n
++    for i in range(m - 1, m - 1 - rows, -1):
++        k -= 1
++        # k now points to the column in which we want to put a pivot.
++        # We want zeros in all entries to the left of the pivot column.
++        for j in range(k - 1, -1, -1):
++            if A[i][j] != 0:
++                # Replace cols j, k by lin combs of these cols such that, in row i,
++                # col j has 0, while col k has the gcd of their row i entries. Note
++                # that this ensures a nonzero entry in col k.
++                u, v, d = _gcdex(A[i][k], A[i][j])
++                r, s = A[i][k] // d, A[i][j] // d
++                add_columns(A, k, j, u, v, -s, r)
++        b = A[i][k]
++        # Do not want the pivot entry to be negative.
++        if b < 0:
++            add_columns(A, k, k, -1, 0, -1, 0)
++            b = -b
++        # The pivot entry will be 0 iff the row was 0 from the pivot col all the
++        # way to the left. In this case, we are still working on the same pivot
++        # col for the next row. Therefore:
++        if b == 0:
++            k += 1
++        # If the pivot entry is nonzero, then we want to reduce all entries to its
++        # right in the sense of the division algorithm, i.e. make them all remainders
++        # w.r.t. the pivot as divisor.
++        else:
++            for j in range(k + 1, n):
++                q = A[i][j] // b
++                add_columns(A, j, k, 1, -q, 0, 1)
++    # Finally, the HNF consists of those columns of A in which we succeeded in making
++    # a nonzero pivot.
++    return DomainMatrix.from_rep(A)[:, k:]
++
++"""
++
++new_logic = """    if not A.domain.is_ZZ:
++        raise DMDomainError('Matrix must be over domain ZZ.')
++    m, n = A.shape
++    A = A.to_dense().rep.copy()
++    k = n
++    i = m - 1
++    while i >= 0 and k >= 1:
++        k -= 1
++        for j in range(k - 1, -1, -1):
++            if A[i][j] != 0:
++                u, v, d = _gcdex(A[i][k], A[i][j])
++                r, s = A[i][k] // d, A[i][j] // d
++                add_columns(A, k, j, u, v, -s, r)
++        b = A[i][k]
++        if b < 0:
++            add_columns(A, k, k, -1, 0, -1, 0)
++            b = -b
++        if b == 0:
++            k += 1
++        else:
++            for j in range(k + 1, n):
++                q = A[i][j] // b
++                add_columns(A, j, k, 1, -q, 0, 1)
++        i -= 1
++    return DomainMatrix.from_rep(A)[:, k:]
++
++"""
++
++content = content.replace(old_logic, new_logic)
++
++with open("sympy/polys/matrices/normalforms.py", "w") as f:
++    f.write(content)
++
+diff --git a/reproduce.py b/reproduce.py
+new file mode 100644
+index 0000000000..fd8c408c0f
+--- /dev/null
++++ b/reproduce.py
+@@ -0,0 +1,21 @@
++import numpy as np
++from sympy import Matrix
++from sympy.matrices.normalforms import hermite_normal_form
++
++# The input array
++A = np.array([[5, 8, 12], [0, 0, 1]])
++
++# Perform operations
++flip_A = np.flip(A)
++mat_A = Matrix(flip_A).T
++hnf = hermite_normal_form(mat_A)
++res = np.flip(np.array(hnf.T).astype(int))
++
++print("Original:")
++print(A)
++print("HNF steps:")
++print("flip_A:", flip_A)
++print("mat_A:", mat_A)
++print("hnf:", hnf)
++print("res:")
++print(res)
+diff --git a/sympy/polys/matrices/normalforms.py b/sympy/polys/matrices/normalforms.py
+index 30f5534b08..d86a96a7e7 100644
+--- a/sympy/polys/matrices/normalforms.py
++++ b/sympy/polys/matrices/normalforms.py
+@@ -204,47 +204,28 @@ def _hermite_normal_form(A):
+     """
+     if not A.domain.is_ZZ:
+         raise DMDomainError('Matrix must be over domain ZZ.')
+-    # We work one row at a time, starting from the bottom row, and working our
+-    # way up. The total number of rows we will consider is min(m, n), where
+-    # A is an m x n matrix.
+     m, n = A.shape
+-    rows = min(m, n)
+     A = A.to_dense().rep.copy()
+-    # Our goal is to put pivot entries in the rightmost columns.
+-    # Invariant: Before processing each row, k should be the index of the
+-    # leftmost column in which we have so far put a pivot.
+     k = n
+-    for i in range(m - 1, m - 1 - rows, -1):
++    i = m - 1
++    while i >= 0 and k >= 1:
+         k -= 1
+-        # k now points to the column in which we want to put a pivot.
+-        # We want zeros in all entries to the left of the pivot column.
+         for j in range(k - 1, -1, -1):
+             if A[i][j] != 0:
+-                # Replace cols j, k by lin combs of these cols such that, in row i,
+-                # col j has 0, while col k has the gcd of their row i entries. Note
+-                # that this ensures a nonzero entry in col k.
+                 u, v, d = _gcdex(A[i][k], A[i][j])
+                 r, s = A[i][k] // d, A[i][j] // d
+                 add_columns(A, k, j, u, v, -s, r)
+         b = A[i][k]
+-        # Do not want the pivot entry to be negative.
+         if b < 0:
+             add_columns(A, k, k, -1, 0, -1, 0)
+             b = -b
+-        # The pivot entry will be 0 iff the row was 0 from the pivot col all the
+-        # way to the left. In this case, we are still working on the same pivot
+-        # col for the next row. Therefore:
+         if b == 0:
+             k += 1
+-        # If the pivot entry is nonzero, then we want to reduce all entries to its
+-        # right in the sense of the division algorithm, i.e. make them all remainders
+-        # w.r.t. the pivot as divisor.
+         else:
+             for j in range(k + 1, n):
+                 q = A[i][j] // b
+                 add_columns(A, j, k, 1, -q, 0, 1)
+-    # Finally, the HNF consists of those columns of A in which we succeeded in making
+-    # a nonzero pivot.
++        i -= 1
+     return DomainMatrix.from_rep(A)[:, k:]
+ 
+ 
+diff --git a/test_hnf.py b/test_hnf.py
+new file mode 100644
+index 0000000000..6658e42cb1
+--- /dev/null
++++ b/test_hnf.py
+@@ -0,0 +1,6 @@
++from sympy import Matrix
++from sympy.matrices.normalforms import hermite_normal_form
++
++m = Matrix([[1, 12], [0, 8], [0, 5]])
++print("m.rank():", m.rank())
++print("hnf:", hermite_normal_form(m))

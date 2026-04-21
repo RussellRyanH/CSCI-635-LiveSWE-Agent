@@ -1,0 +1,1 @@
+This folder contains custom mini-swe-agent configuration files that we adapted from the Live-SWE-Agent configuration file.

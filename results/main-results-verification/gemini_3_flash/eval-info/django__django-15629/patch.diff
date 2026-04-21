@@ -1,0 +1,155 @@
+diff --git a/django/db/models/fields/related.py b/django/db/models/fields/related.py
+index fad5560486..45f5c7152f 100644
+--- a/django/db/models/fields/related.py
++++ b/django/db/models/fields/related.py
+@@ -1180,7 +1180,11 @@ class ForeignKey(ForeignObject):
+         return self.target_field.rel_db_type(connection=connection)
+ 
+     def db_parameters(self, connection):
+-        return {"type": self.db_type(connection), "check": self.db_check(connection)}
++        return {
++            "type": self.db_type(connection),
++            "check": self.db_check(connection),
++            "collation": getattr(self.target_field, "db_collation", None),
++        }
+ 
+     def convert_empty_strings(self, value, expression, connection):
+         if (not value) and isinstance(value, str):
+diff --git a/editor.py b/editor.py
+new file mode 100644
+index 0000000000..d8af577731
+--- /dev/null
++++ b/editor.py
+@@ -0,0 +1,11 @@
++import sys
++
++def edit_file(filename, search_text, replace_text):
++    with open(filename, 'r') as f:
++        content = f.read()
++    new_content = content.replace(search_text, replace_text)
++    with open(filename, 'w') as f:
++        f.write(new_content)
++
++if __name__ == "__main__":
++    edit_file(sys.argv[1], sys.argv[2], sys.argv[3])
+diff --git a/reproduce_app/__init__.py b/reproduce_app/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..d602dd1764
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,51 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.apps import AppConfig, apps
++
++# Configure Django with SQLite for inspection (avoids MySQL dependency)
++if not settings.configured:
++    settings.configure(
++        INSTALLED_APPS=['reproduce_app'],
++        DATABASES={'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }},
++    )
++    django.setup()
++
++class Account(models.Model):
++    id = models.CharField(primary_key=True, max_length=22, db_collation='utf8_bin')
++    class Meta:
++        app_label = 'reproduce_app'
++
++class Profile(models.Model):
++    account = models.ForeignKey(Account, on_delete=models.CASCADE)
++    class Meta:
++        app_label = 'reproduce_app'
++
++def test_collation_propagation():
++    account_id_field = Account._meta.get_field('id')
++    profile_account_field = Profile._meta.get_field('account')
++    
++    print(f"Account.id db_collation: {account_id_field.db_collation}")
++    
++    # Check if the foreign key field has the collation
++    # In Django, foreign keys often don't have the collation attribute set on them directly
++    # but they should have it when generating the database column.
++    print(f"Profile.account db_collation: {getattr(profile_account_field, 'db_collation', 'NOT SET')}")
++    
++    # Look at the target field's collation
++    target_field = profile_account_field.target_field
++    print(f"Profile.account target_field db_collation: {target_field.db_collation}")
++    
++    # Mocking what the schema editor would see
++    from django.db import connection
++    # Even if we use SQLite here, we can see if the field's db_parameters include the collation
++    # We might need to trick it to think it's MySQL or look at the code that collects params.
++    params = profile_account_field.db_parameters(connection)
++    print(f"Profile.account db_parameters: {params}")
++
++if __name__ == "__main__":
++    test_collation_propagation()
+diff --git a/reproduce_issue_v2.py b/reproduce_issue_v2.py
+new file mode 100644
+index 0000000000..9e826b2e4c
+--- /dev/null
++++ b/reproduce_issue_v2.py
+@@ -0,0 +1,55 @@
++import django
++from django.conf import settings
++from django.db import models
++from django.db import connection
++
++# Configure Django with SQLite for inspection
++if not settings.configured:
++    settings.configure(
++        INSTALLED_APPS=['reproduce_app'],
++        DATABASES={'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }},
++    )
++    django.setup()
++
++class Account(models.Model):
++    id = models.CharField(primary_key=True, max_length=22, db_collation='utf8_bin')
++    class Meta:
++        app_label = 'reproduce_app'
++
++class Profile(models.Model):
++    account = models.ForeignKey(Account, on_delete=models.CASCADE)
++    class Meta:
++        app_label = 'reproduce_app'
++
++def test_collation_propagation():
++    account_id_field = Account._meta.get_field('id')
++    profile_account_field = Profile._meta.get_field('account')
++    
++    print(f"Account.id db_collation: {account_id_field.db_collation}")
++    
++    # Check if the foreign key field has the collation in its db_parameters
++    # We use a mock connection that claims to support collation
++    class MockConnection:
++        def __init__(self, real_conn):
++            self.real_conn = real_conn
++            self.features = real_conn.features
++            self.ops = real_conn.ops
++            self.vendor = 'mysql' # Pretend to be mysql
++        def __getattr__(self, name):
++            return getattr(self.real_conn, name)
++
++    mock_conn = MockConnection(connection)
++    
++    params = profile_account_field.db_parameters(mock_conn)
++    print(f"Profile.account db_parameters: {params}")
++    
++    if params.get('collation') == 'utf8_bin':
++        print("SUCCESS: Collation propagated")
++    else:
++        print("FAILURE: Collation NOT propagated")
++
++if __name__ == "__main__":
++    test_collation_propagation()

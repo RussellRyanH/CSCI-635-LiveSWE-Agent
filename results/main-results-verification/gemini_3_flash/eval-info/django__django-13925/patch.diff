@@ -1,0 +1,212 @@
+diff --git a/debug_meta.py b/debug_meta.py
+new file mode 100644
+index 0000000000..78a7726adf
+--- /dev/null
++++ b/debug_meta.py
+@@ -0,0 +1,33 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}},
++        INSTALLED_APPS=['reproduce_app'],
++    )
++    django.setup()
++
++class Base(models.Model):
++    class Meta:
++        app_label = 'reproduce_app'
++
++class Child(Base):
++    class Meta:
++        app_label = 'reproduce_app'
++
++print(f"Base PK: {Base._meta.pk}")
++print(f"Base PK auto_created: {Base._meta.pk.auto_created}")
++print(f"Base PK model: {Base._meta.pk.model}")
++
++print(f"Child PK: {Child._meta.pk}")
++print(f"Child PK auto_created: {Child._meta.pk.auto_created}")
++print(f"Child PK model: {Child._meta.pk.model}")
++print(f"Child parents: {Child._meta.get_parent_list()}")
++for parent in Child._meta.get_parent_list():
++    print(f"Parent {parent} PK model: {parent._meta.pk.model}")
++    print(f"Parent {parent} PK auto_created: {parent._meta.pk.auto_created}")
++
+diff --git a/debug_pk.py b/debug_pk.py
+new file mode 100644
+index 0000000000..d8bcddfac6
+--- /dev/null
++++ b/debug_pk.py
+@@ -0,0 +1,25 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}},
++        INSTALLED_APPS=['reproduce_app'],
++    )
++    django.setup()
++
++from reproduce_app.models import Entity, User
++
++def print_pk_info(model):
++    pk = model._meta.pk
++    print(f"Model: {model.__name__}")
++    print(f"  PK field: {pk}")
++    print(f"  PK auto_created: {pk.auto_created}")
++    print(f"  PK model: {pk.model}")
++    print(f"  Parents: {model._meta.parents}")
++
++print_pk_info(Entity)
++print_pk_info(User)
+diff --git a/django/db/models/base.py b/django/db/models/base.py
+index 4038859cfa..3946e6c5d2 100644
+--- a/django/db/models/base.py
++++ b/django/db/models/base.py
+@@ -1299,6 +1299,11 @@ class Model(metaclass=ModelBase):
+     def _check_default_pk(cls):
+         if (
+             cls._meta.pk.auto_created and
++            not any(
++                not parent._meta.pk.auto_created or
++                (parent._meta.pk.model is parent and parent._meta.pk.auto_created)
++                for parent in cls._meta.get_parent_list()
++            ) and
+             not settings.is_overridden('DEFAULT_AUTO_FIELD') and
+             not cls._meta.app_config._is_default_auto_field_overridden
+         ):
+diff --git a/editor.py b/editor.py
+new file mode 100644
+index 0000000000..6074b3afec
+--- /dev/null
++++ b/editor.py
+@@ -0,0 +1,31 @@
++import sys
++import os
++
++def main():
++    if len(sys.argv) < 4:
++        print("Usage: python editor.py <file_path> <search_string> <replacement_string>")
++        sys.exit(1)
++
++    file_path = sys.argv[1]
++    search_string = sys.argv[2]
++    replacement_string = sys.argv[3]
++
++    if not os.path.exists(file_path):
++        print(f"Error: File '{file_path}' does not exist.")
++        sys.exit(1)
++
++    with open(file_path, 'r') as f:
++        content = f.read()
++
++    if search_string not in content:
++        print(f"Error: Search string not found in '{file_path}'.")
++        sys.exit(1)
++
++    new_content = content.replace(search_string, replacement_string)
++
++    with open(file_path, 'w') as f:
++        f.write(new_content)
++    print(f"Successfully updated '{file_path}'.")
++
++if __name__ == "__main__":
++    main()
+diff --git a/reproduce_app/__init__.py b/reproduce_app/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/reproduce_app/models.py b/reproduce_app/models.py
+new file mode 100644
+index 0000000000..2910dd087a
+--- /dev/null
++++ b/reproduce_app/models.py
+@@ -0,0 +1,10 @@
++from django.db import models
++
++class Entity(models.Model):
++    id = models.AutoField(primary_key=True)
++    class Meta:
++        app_label = 'reproduce_app'
++
++class User(Entity):
++    class Meta:
++        app_label = 'reproduce_app'
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..b275890133
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,64 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++
++if not settings.configured:
++    settings.configure(
++        DEBUG=True,
++        DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}},
++        INSTALLED_APPS=['reproduce_app'],
++    )
++    django.setup()
++
++# Test case 1: Inherited explicit PK
++class Entity2(models.Model):
++    id = models.AutoField(primary_key=True)
++    class Meta:
++        app_label = 'reproduce_app'
++
++class User2(Entity2):
++    class Meta:
++        app_label = 'reproduce_app'
++
++# Test case 2: Inherited implicit PK
++class Base2(models.Model):
++    class Meta:
++        app_label = 'reproduce_app'
++
++class Child2(Base2):
++    class Meta:
++        app_label = 'reproduce_app'
++
++# Test case 3: Truly auto-created primary key
++class NewModel2(models.Model):
++    name = models.CharField(max_length=100)
++    class Meta:
++        app_label = 'reproduce_app'
++
++from django.core.checks import run_checks
++print("Running checks...")
++errors = run_checks()
++# for error in errors:
++#     print(error)
++
++w042_errors = [error for error in errors if error.id == 'models.W042']
++print(f"\nFound {len(w042_errors)} W042 errors.")
++for error in w042_errors:
++    print(f"  {error.obj.__name__}")
++
++user_has_error = any(error.obj is User2 for error in w042_errors)
++base_has_error = any(error.obj is Base2 for error in w042_errors)
++child_has_error = any(error.obj is Child2 for error in w042_errors)
++new_has_error = any(error.obj is NewModel2 for error in w042_errors)
++
++if user_has_error:
++    print("FAIL: User2 should not have W042 error (inherited explicit PK)")
++elif not base_has_error:
++    print("FAIL: Base2 should have W042 error")
++elif child_has_error:
++    print("FAIL: Child2 should not have W042 error (already reported for Base2)")
++elif not new_has_error:
++    print("FAIL: NewModel2 should have W042 error")
++else:
++    print("SUCCESS: Fix works as expected for all cases")

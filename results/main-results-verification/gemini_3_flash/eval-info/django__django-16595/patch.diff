@@ -1,0 +1,207 @@
+diff --git a/django/db/migrations/operations/fields.py b/django/db/migrations/operations/fields.py
+index cd3aab43ad..1cc13ccc46 100644
+--- a/django/db/migrations/operations/fields.py
++++ b/django/db/migrations/operations/fields.py
+@@ -245,12 +245,16 @@ class AlterField(FieldOperation):
+     @property
+     def migration_name_fragment(self):
+         return "alter_%s_%s" % (self.model_name_lower, self.name_lower)
+-
+     def reduce(self, operation, app_label):
+         if isinstance(operation, RemoveField) and self.is_same_field_operation(
+             operation
+         ):
+             return [operation]
++        elif (
++            isinstance(operation, AlterField)
++            and self.is_same_field_operation(operation)
++        ):
++            return [operation]
+         elif (
+             isinstance(operation, RenameField)
+             and self.is_same_field_operation(operation)
+@@ -266,7 +270,6 @@ class AlterField(FieldOperation):
+             ]
+         return super().reduce(operation, app_label)
+ 
+-
+ class RenameField(FieldOperation):
+     """Rename a field on the model. Might affect db_column too."""
+ 
+diff --git a/edit_file.py b/edit_file.py
+new file mode 100644
+index 0000000000..94dba02a5d
+--- /dev/null
++++ b/edit_file.py
+@@ -0,0 +1,25 @@
++import sys
++
++def edit_file(filename, start_line, end_line, new_content):
++    with open(filename, 'r') as f:
++        lines = f.readlines()
++    
++    # Adjust to 0-indexed
++    start_index = start_line - 1
++    end_index = end_line
++    
++    lines[start_index:end_index] = new_content.splitlines(keepends=True)
++    
++    with open(filename, 'w') as f:
++        f.writelines(lines)
++
++if __name__ == "__main__":
++    import argparse
++    parser = argparse.ArgumentParser()
++    parser.add_argument("filename")
++    parser.add_argument("start_line", type=int)
++    parser.add_argument("end_line", type=int)
++    args = parser.parse_args()
++    
++    new_content = sys.stdin.read()
++    edit_file(args.filename, args.start_line, args.end_line, new_content)
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..1f76c6606d
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,53 @@
++import django
++from django.conf import settings
++from django.db import migrations, models
++from django.db.migrations.optimizer import MigrationOptimizer
++
++def main():
++    operations = [
++        migrations.AddField(
++            model_name="book",
++            name="title",
++            field=models.CharField(max_length=256, null=True),
++        ),
++        migrations.AlterField(
++            model_name="book",
++            name="title",
++            field=models.CharField(max_length=128, null=True),
++        ),
++        migrations.AlterField(
++            model_name="book",
++            name="title",
++            field=models.CharField(max_length=128, null=True, help_text="help"),
++        ),
++        migrations.AlterField(
++            model_name="book",
++            name="title",
++            field=models.CharField(max_length=128, null=True, help_text="help", default=None),
++        ),
++    ]
++
++    optimizer = MigrationOptimizer()
++    
++    print("Optimizing all operations (should return AddField only):")
++    optimized_all = optimizer.optimize(operations, "books")
++    for op in optimized_all:
++        print(f"  {op}")
++    
++    print("\nOptimizing only AlterField operations (should be reduced to one AlterField):")
++    optimized_alter_only = optimizer.optimize(operations[1:], "books")
++    for op in optimized_alter_only:
++        # For nicer output, print the field attributes if it's an AlterField
++        if isinstance(op, migrations.AlterField):
++            field_attrs = {
++                'max_length': getattr(op.field, 'max_length', None),
++                'null': getattr(op.field, 'null', None),
++                'help_text': getattr(op.field, 'help_text', None),
++                'default': getattr(op.field, 'default', None),
++            }
++            print(f"  {op} (attrs: {field_attrs})")
++        else:
++            print(f"  {op}")
++
++if __name__ == "__main__":
++    main()
+diff --git a/test_extra_cases.py b/test_extra_cases.py
+new file mode 100644
+index 0000000000..0c13cd12b7
+--- /dev/null
++++ b/test_extra_cases.py
+@@ -0,0 +1,52 @@
++import django
++from django.conf import settings
++from django.db import migrations, models
++from django.db.migrations.optimizer import MigrationOptimizer
++
++def main():
++    optimizer = MigrationOptimizer()
++    
++    print("Test 1: AlterField + AlterField -> Last AlterField")
++    ops1 = [
++        migrations.AlterField(model_name="book", name="title", field=models.CharField(max_length=128)),
++        migrations.AlterField(model_name="book", name="title", field=models.CharField(max_length=256)),
++    ]
++    optimized1 = optimizer.optimize(ops1, "books")
++    for op in optimized1:
++        print(f"  {op} max_length={op.field.max_length}")
++
++    print("\nTest 2: AlterField + RenameField")
++    ops2 = [
++        migrations.AlterField(model_name="book", name="title", field=models.CharField(max_length=128)),
++        migrations.RenameField(model_name="book", old_name="title", new_name="new_title"),
++    ]
++    optimized2 = optimizer.optimize(ops2, "books")
++    for op in optimized2:
++        if isinstance(op, migrations.RenameField):
++            print(f"  {op} {op.old_name} -> {op.new_name}")
++        elif isinstance(op, migrations.AlterField):
++            print(f"  {op} name={op.name} max_length={op.field.max_length}")
++
++    print("\nTest 3: RenameField + AlterField")
++    ops3 = [
++        migrations.RenameField(model_name="book", old_name="title", new_name="new_title"),
++        migrations.AlterField(model_name="book", name="new_title", field=models.CharField(max_length=128)),
++    ]
++    optimized3 = optimizer.optimize(ops3, "books")
++    for op in optimized3:
++        if isinstance(op, migrations.RenameField):
++            print(f"  {op} {op.old_name} -> {op.new_name}")
++        elif isinstance(op, migrations.AlterField):
++            print(f"  {op} name={op.name} max_length={op.field.max_length}")
++
++    print("\nTest 4: AlterField + RemoveField")
++    ops4 = [
++        migrations.AlterField(model_name="book", name="title", field=models.CharField(max_length=128)),
++        migrations.RemoveField(model_name="book", name="title"),
++    ]
++    optimized4 = optimizer.optimize(ops4, "books")
++    for op in optimized4:
++        print(f"  {op}")
++
++if __name__ == "__main__":
++    main()
+diff --git a/test_extra_cases_2.py b/test_extra_cases_2.py
+new file mode 100644
+index 0000000000..430b8bda89
+--- /dev/null
++++ b/test_extra_cases_2.py
+@@ -0,0 +1,23 @@
++import django
++from django.conf import settings
++from django.db import migrations, models
++from django.db.migrations.optimizer import MigrationOptimizer
++
++def main():
++    optimizer = MigrationOptimizer()
++    
++    print("\nTest 5: AddField + AlterField + AlterField")
++    ops5 = [
++        migrations.AddField(model_name="book", name="title", field=models.CharField(max_length=256)),
++        migrations.AlterField(model_name="book", name="title", field=models.CharField(max_length=128)),
++        migrations.AlterField(model_name="book", name="title", field=models.TextField()),
++    ]
++    optimized5 = optimizer.optimize(ops5, "books")
++    for op in optimized5:
++        if isinstance(op, migrations.AddField):
++            print(f"  {op} field_type={type(op.field)}")
++        else:
++            print(f"  {op}")
++
++if __name__ == "__main__":
++    main()
