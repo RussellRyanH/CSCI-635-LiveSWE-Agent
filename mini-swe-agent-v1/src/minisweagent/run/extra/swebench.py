@@ -149,7 +149,7 @@ def process_instance(
             instance_id=instance_id,
             **config.get("agent", {}),
         )
-        exit_status, result = agent.run(task)
+        exit_status, result, prompt_evo_info = agent.run(task)
     except Exception as e:
         logger.error(f"Error processing instance {instance_id}: {e}", exc_info=True)
         exit_status, result = type(e).__name__, str(e)
@@ -163,6 +163,7 @@ def process_instance(
             extra_info=extra_info,
             instance_id=instance_id,
             print_fct=logger.info,
+            kwargs=prompt_evo_info
         )
         update_preds_file(output_dir / "preds.json", instance_id, model.config.model_name, result)
         progress_manager.on_instance_end(instance_id, exit_status)

@@ -66,13 +66,13 @@ def main(
 
     exit_status, result, extra_info = None, None, None
     try:
-        exit_status, result = agent.run(instance["problem_statement"])  # type: ignore[arg-type]
+        exit_status, result, prompt_evo_info = agent.run(instance["problem_statement"])  # type: ignore[arg-type]
     except Exception as e:
         logger.error(f"Error processing instance {instance_spec}: {e}", exc_info=True)
         exit_status, result = type(e).__name__, str(e)
         extra_info = {"traceback": traceback.format_exc()}
     finally:
-        save_traj(agent, output, exit_status=exit_status, result=result, extra_info=extra_info)  # type: ignore[arg-type]
+        save_traj(agent, output, exit_status=exit_status, result=result, extra_info=extra_info, kwargs=prompt_evo_info)  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":

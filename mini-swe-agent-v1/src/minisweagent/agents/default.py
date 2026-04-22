@@ -103,7 +103,7 @@ class DefaultAgent:
                 self.add_message("user", str(e))
             except TerminatingException as e:
                 self.add_message("user", str(e))
-                return type(e).__name__, str(e)
+                return type(e).__name__, str(e), {"n_prompt_edits" : self.n_prompt_edits, "final_task_description" : self.extra_template_vars["task"]}
 
     def step(self) -> dict:
         """Query the LM, execute the action, return the observation."""
@@ -115,7 +115,6 @@ class DefaultAgent:
         
         if new_content != None:
             self.extra_template_vars["task"] = new_content 
-            #self.messages[1]["content"] = self.model.format_message(role="user", content=self._render_template(self.config.instance_template))
 
     def get_file_contents(self, path):
         action = {'command' : 'cat ' + path}
