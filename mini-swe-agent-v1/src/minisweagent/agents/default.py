@@ -69,6 +69,7 @@ class DefaultAgent:
         self.model = model
         self.env = env
         self.extra_template_vars = {}
+        self.n_prompt_edits = 0
 
     def render_template(self, template: str, **kwargs) -> str:
         template_vars = asdict(self.config) | self.env.get_template_vars() | self.model.get_template_vars()
@@ -85,8 +86,18 @@ class DefaultAgent:
         self.messages = []
         self.add_message("system", self.render_template(self.config.system_template))
         self.add_message("user", self.render_template(self.config.instance_template))
+        
+        #This path to the file can be just passed as extra arg. This could be a generic json file as well.
+        task_description_path = self.extra_template_vars["task_description_path"]
+
+        self.create_file_in_env(task, task_description_path)
+
         while True:
             try:
+                if self.file_has_changed(task_description_path):
+                    self.update_file(task_description_path)
+                    self.n_prompt_edits += 1
+
                 self.step()
             except NonTerminatingException as e:
                 self.add_message("user", str(e))
@@ -97,6 +108,26 @@ class DefaultAgent:
     def step(self) -> dict:
         """Query the LM, execute the action, return the observation."""
         return self.get_observation(self.query())
+
+    def update_file(self, path):
+        """Update the task description with contents of the given file and rerender the template"""
+        new_content = self.get_file_contents(path)
+        
+        if new_content != None:
+            self.extra_template_vars["task"] = new_content 
+            #self.messages[1]["content"] = self.model.format_message(role="user", content=self._render_template(self.config.instance_template))
+
+    def get_file_contents(self, path):
+        action = {'command' : 'cat ' + path}
+        result = self.env.execute(action)
+        return result.get("output", None)
+    
+    def file_has_changed(self, path):
+        previous_action = str(self.messages[len(self.messages)-2])
+        return path in previous_action   #Checks to see if the task file was referenced in the last tool call before updating template
+
+    def create_file_in_env(self, string, path):
+        self.env.execute({'command' : "echo \"" + string.replace("`", "") + "\" > " + path})
 
     def query(self) -> dict:
         """Query the model and return the response."""
