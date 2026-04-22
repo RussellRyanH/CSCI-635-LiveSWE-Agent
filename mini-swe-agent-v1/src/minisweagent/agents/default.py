@@ -88,7 +88,7 @@ class DefaultAgent:
         self.add_message("user", self.render_template(self.config.instance_template))
         
         #This path to the file can be just passed as extra arg. This could be a generic json file as well.
-        task_description_path = self.extra_template_vars["task_description_path"]
+        task_description_path = self.config.environment["task_description_path"]
 
         self.create_file_in_env(task, task_description_path)
 
