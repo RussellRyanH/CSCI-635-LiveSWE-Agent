@@ -10,6 +10,7 @@ from typing import Any
 @dataclass
 class DockerEnvironmentConfig:
     image: str
+    task_description_path: str = ""
     cwd: str = "/"
     """Working directory in which to execute commands."""
     env: dict[str, str] = field(default_factory=dict)

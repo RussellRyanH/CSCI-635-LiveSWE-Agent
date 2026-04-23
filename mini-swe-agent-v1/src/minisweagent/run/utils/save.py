@@ -28,6 +28,7 @@ def save_traj(
     result: str | None = None,
     extra_info: dict | None = None,
     print_fct: Callable = print,
+    prompt_evo_info: dict | None = None,
     **kwargs,
 ):
     """Save the trajectory of the agent to a file.
@@ -53,6 +54,7 @@ def save_traj(
                 "api_calls": 0,
             },
             "mini_version": __version__,
+            "prompt_evo_info": _asdict(prompt_evo_info)
         },
         "messages": [],
         "trajectory_format": "mini-swe-agent-1",

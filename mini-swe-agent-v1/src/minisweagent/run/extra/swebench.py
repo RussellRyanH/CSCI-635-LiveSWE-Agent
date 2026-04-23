@@ -162,8 +162,8 @@ def process_instance(
             result=result,
             extra_info=extra_info,
             instance_id=instance_id,
-            print_fct=logger.info,
-            kwargs=prompt_evo_info
+            prompt_evo_info=prompt_evo_info,
+            print_fct=logger.info
         )
         update_preds_file(output_dir / "preds.json", instance_id, model.config.model_name, result)
         progress_manager.on_instance_end(instance_id, exit_status)

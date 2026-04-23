@@ -72,7 +72,7 @@ def main(
         exit_status, result = type(e).__name__, str(e)
         extra_info = {"traceback": traceback.format_exc()}
     finally:
-        save_traj(agent, output, exit_status=exit_status, result=result, extra_info=extra_info, kwargs=prompt_evo_info)  # type: ignore[arg-type]
+        save_traj(agent, output, exit_status=exit_status, result=result, extra_info=extra_info, prompt_evo_info=prompt_evo_info)  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":
