@@ -69,7 +69,7 @@ class DefaultAgent:
         self.model = model
         self.env = env
         self.extra_template_vars = {}
-        self.n_prompt_edits = 0
+        self.n_task_description_edits = 0
 
     def render_template(self, template: str, **kwargs) -> str:
         template_vars = asdict(self.config) | self.env.get_template_vars() | self.model.get_template_vars()
@@ -96,14 +96,14 @@ class DefaultAgent:
             try:
                 if self.file_has_changed(task_description_path):
                     self.update_file(task_description_path)
-                    self.n_prompt_edits += 1
+                    self.n_task_description_edits += 1
 
                 self.step()
             except NonTerminatingException as e:
                 self.add_message("user", str(e))
             except TerminatingException as e:
                 self.add_message("user", str(e))
-                return type(e).__name__, str(e), {"n_prompt_edits" : self.n_prompt_edits, "final_task_description" : self.extra_template_vars["task"]}
+                return type(e).__name__, str(e), {"n_task_description_edits" : self.n_task_description_edits, "final_task_description" : self.extra_template_vars["task"]}
 
     def step(self) -> dict:
         """Query the LM, execute the action, return the observation."""

@@ -13,4 +13,21 @@ This project contains all artifacts (wiht the exception of trajectories) gerneat
 
 - subsets - contains csv files for that list the instance names of the a paticular subset of problems from swe-bench-verified that you wish to use to test the agent.
 
-## Usage
+## Replication Steps
+
+## Running Live-SWE-agent on SWE-bench
+
+## Evaluating the SWE-bench Predictions
+
+## Additional Documentation
+This project spans multiple different existing repo including mini-swe-agent, live-swe-agent, and swe-bench. Below is a summary of links to documentation we found useful in replicate this work.
+
+- [Live-SWE-agent Repo](https://github.com/OpenAutoCoder/live-swe-agent) - This link is for the Live-swe-agent repo which contains documentation on how to run live-swe-agent.
+
+- [Mini-SWE-agent Documentation](https://mini-swe-agent.com/v1/usage/swebench/) - This link contains detailed info on workign mini-swe-agent v1 and v2.
+
+- [Mini-SWE-agent Repo](https://github.com/SWE-agent/mini-swe-agent) - This link is for the mini-swe-agent repo which contains documentation on how to run live-swe-agent.
+
+- [SWE-bench Documentation](https://www.swebench.com/SWE-bench/) - This link is for the SWE-bench site whihc contains documation fo rswe-bench as wellsas leaderboard stats.
+
+- [SWE-bench](https://github.com/SWE-bench/SWE-bench) - This is the link to the SWE-bench repo which continas the testing harness to evaluate the predictions madew by the agent. 
