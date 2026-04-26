@@ -12,6 +12,7 @@ source /opt/miniconda3/bin/activate
 conda activate testbed
 python -m pip install -e .
 git checkout 76e37513e22f4d9a01c7f15eee36fe44388e6670 tests/async/models.py tests/generic_relations/tests.py
+rm -f tests/async/test_async_related_managers.py
 git apply -v - <<'EOF_114329324912'
 diff --git a/tests/async/models.py b/tests/async/models.py
 --- a/tests/async/models.py
@@ -143,3 +144,4 @@ EOF_114329324912
 ./tests/runtests.py --verbosity 2 --settings=test_sqlite --parallel 1 async.models async.test_async_related_managers generic_relations.tests
 : '>>>>> End Test Output'
 git checkout 76e37513e22f4d9a01c7f15eee36fe44388e6670 tests/async/models.py tests/generic_relations/tests.py
+rm -f tests/async/test_async_related_managers.py

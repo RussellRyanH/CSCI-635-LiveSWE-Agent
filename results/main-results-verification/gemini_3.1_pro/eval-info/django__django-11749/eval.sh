@@ -16,6 +16,7 @@ source /opt/miniconda3/bin/activate
 conda activate testbed
 python -m pip install -e .
 git checkout 350123f38c2b6217c38d70bfbd924a9ba3df1289 tests/user_commands/tests.py
+rm -f tests/user_commands/management/commands/mutually_exclusive_required.py
 git apply -v - <<'EOF_114329324912'
 diff --git a/tests/user_commands/management/commands/mutually_exclusive_required.py b/tests/user_commands/management/commands/mutually_exclusive_required.py
 new file mode 100644
@@ -60,3 +61,4 @@ EOF_114329324912
 ./tests/runtests.py --verbosity 2 --settings=test_sqlite --parallel 1 user_commands.management.commands.mutually_exclusive_required user_commands.tests
 : '>>>>> End Test Output'
 git checkout 350123f38c2b6217c38d70bfbd924a9ba3df1289 tests/user_commands/tests.py
+rm -f tests/user_commands/management/commands/mutually_exclusive_required.py
