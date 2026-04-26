@@ -1,0 +1,101 @@
+diff --git a/REFLECTION_PROMPT_PATH b/REFLECTION_PROMPT_PATH
+new file mode 100644
+index 0000000000..8b13789179
+--- /dev/null
++++ b/REFLECTION_PROMPT_PATH
+@@ -0,0 +1 @@
++
+diff --git a/django/db/models/expressions.py b/django/db/models/expressions.py
+index 5e3c7cab82..cbf4fd8296 100644
+--- a/django/db/models/expressions.py
++++ b/django/db/models/expressions.py
+@@ -533,6 +533,7 @@ _connector_combinations = [
+             Combinable.SUB,
+             Combinable.MUL,
+             Combinable.DIV,
++            Combinable.MOD,
+         )
+     },
+     # Bitwise operators.
+diff --git a/fix_expressions.py b/fix_expressions.py
+new file mode 100644
+index 0000000000..d9d2ba7190
+--- /dev/null
++++ b/fix_expressions.py
+@@ -0,0 +1,21 @@
++import sys
++
++file_path = 'django/db/models/expressions.py'
++with open(file_path, 'r') as f:
++    lines = f.readlines()
++
++in_diff_type_section = False
++for i, line in enumerate(lines):
++    if '# Numeric operations - operands of different type.' in line:
++        in_diff_type_section = True
++    
++    if in_diff_type_section and 'Combinable.DIV,' in line:
++        lines.insert(i + 1, '            Combinable.MOD,\n')
++        # Also add POW while we are at it, as it seems logical, but let me check if POW should be returned as FloatField or Decimal.
++        # Actually, Python's `math.pow` or `**` operator between Decimal and int returns Decimal. Between float and int returns float.
++        # It's identical to the other combinations.
++        # Let's see what the PR implies. It only specifies MOD, but let's add POW if it's there for same-type operations but missing for different types.
++        break
++
++with open(file_path, 'w') as f:
++    f.writelines(lines)
+diff --git a/reproduce.py b/reproduce.py
+new file mode 100644
+index 0000000000..2f7b93702d
+--- /dev/null
++++ b/reproduce.py
+@@ -0,0 +1,38 @@
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models import F, Value
++from django.db.models.expressions import Combinable
++
++settings.configure(
++    INSTALLED_APPS=[],
++    DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}}
++)
++django.setup()
++
++class TestModel(models.Model):
++    int_field = models.IntegerField()
++    dec_field = models.DecimalField(max_digits=5, decimal_places=2)
++    
++    class Meta:
++        app_label = 'test_app'
++
++expr = F('int_field') % F('dec_field')
++try:
++    print("Trying to resolve MOD output_field:")
++    print(expr.resolve_expression(models.sql.query.Query(TestModel)).output_field)
++except Exception as e:
++    print("Error:", e)
++
++expr2 = F('int_field') + F('dec_field')
++try:
++    print("\nTrying to resolve ADD output_field:")
++    print(expr2.resolve_expression(models.sql.query.Query(TestModel)).output_field)
++except Exception as e:
++    print("Error:", e)
++expr3 = F('int_field') ** F('dec_field')
++try:
++    print("\nTrying to resolve POW output_field:")
++    print(expr3.resolve_expression(models.sql.query.Query(TestModel)).output_field)
++except Exception as e:
++    print("Error:", e)
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 0000000000..a0f31e9757
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,5 @@
++Resolve output_field when combining numeric expressions with MOD operator.
++Description
++	
++When writing a Django expression for a query that does MOD, if the types of the query are different (Decimal and Integer), it doesn't resolve the result to a Decimal type, like it does for other mathematical operators.
++

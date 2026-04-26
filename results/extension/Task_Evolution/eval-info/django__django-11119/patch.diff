@@ -1,0 +1,144 @@
+diff --git a/REFLECTION_PROMPT_PATH b/REFLECTION_PROMPT_PATH
+new file mode 100644
+index 0000000000..8b13789179
+--- /dev/null
++++ b/REFLECTION_PROMPT_PATH
+@@ -0,0 +1 @@
++
+diff --git a/django/template/engine.py b/django/template/engine.py
+index dfaa67ba12..ff9ce58d59 100644
+--- a/django/template/engine.py
++++ b/django/template/engine.py
+@@ -160,7 +160,7 @@ class Engine:
+         if isinstance(context, Context):
+             return t.render(context)
+         else:
+-            return t.render(Context(context))
++            return t.render(Context(context, autoescape=self.autoescape))
+ 
+     def select_template(self, template_name_list):
+         """
+diff --git a/reproduce.py b/reproduce.py
+new file mode 100644
+index 0000000000..2d4ec3e182
+--- /dev/null
++++ b/reproduce.py
+@@ -0,0 +1,44 @@
++import django
++from django.conf import settings
++from django.template import Engine
++
++settings.configure(
++    TEMPLATES=[
++        {
++            'BACKEND': 'django.template.backends.django.DjangoTemplates',
++            'DIRS': [],
++            'APP_DIRS': True,
++        },
++    ]
++)
++django.setup()
++
++def main():
++    # Create engine with autoescape=False
++    engine = Engine(autoescape=False)
++    
++    # Using from_string to avoid having to create files
++    template = engine.from_string("Hello {{ name }}")
++    
++    # Wait, the bug is about engine.render_to_string, which needs a template file
++    # Let's write a temporary template file.
++    import tempfile
++    import os
++    with tempfile.TemporaryDirectory() as temp_dir:
++        template_path = os.path.join(temp_dir, 'test_template.html')
++        with open(template_path, 'w') as f:
++            f.write("Hello {{ name }}")
++            
++        engine.dirs = [temp_dir]
++        
++        # Test render_to_string
++        result = engine.render_to_string('test_template.html', {'name': '<script>alert()</script>'})
++        
++        print("Result:", result)
++        if '&lt;' in result:
++            print("FAILED: Result was autoescaped!")
++        else:
++            print("SUCCESS: Result was not autoescaped.")
++
++if __name__ == '__main__':
++    main()
+diff --git a/run_tests.py b/run_tests.py
+new file mode 100644
+index 0000000000..53a619d36d
+--- /dev/null
++++ b/run_tests.py
+@@ -0,0 +1,57 @@
++import django
++from django.conf import settings
++from django.template import Engine, Context
++
++settings.configure(
++    TEMPLATES=[
++        {
++            'BACKEND': 'django.template.backends.django.DjangoTemplates',
++            'DIRS': [],
++            'APP_DIRS': True,
++        },
++    ]
++)
++django.setup()
++
++def run():
++    # 1. autoescape=True (default)
++    engine = Engine()
++    template = engine.from_string("Hello {{ name }}")
++    import tempfile, os
++    with tempfile.TemporaryDirectory() as temp_dir:
++        template_path = os.path.join(temp_dir, 'test.html')
++        with open(template_path, 'w') as f: f.write("Hello {{ name }}")
++        engine.dirs = [temp_dir]
++        
++        # string context
++        res1 = engine.render_to_string('test.html', {'name': '<>'})
++        assert res1 == "Hello &lt;&gt;"
++
++        # Context instance
++        ctx = Context({'name': '<>'})
++        res2 = engine.render_to_string('test.html', ctx)
++        assert res2 == "Hello &lt;&gt;"
++        
++        # Context instance with autoescape=False
++        ctx2 = Context({'name': '<>'}, autoescape=False)
++        res3 = engine.render_to_string('test.html', ctx2)
++        assert res3 == "Hello <>"
++        
++    # 2. autoescape=False
++    engine = Engine(autoescape=False)
++    with tempfile.TemporaryDirectory() as temp_dir:
++        template_path = os.path.join(temp_dir, 'test.html')
++        with open(template_path, 'w') as f: f.write("Hello {{ name }}")
++        engine.dirs = [temp_dir]
++        
++        res4 = engine.render_to_string('test.html', {'name': '<>'})
++        assert res4 == "Hello <>"
++
++        ctx3 = Context({'name': '<>'}, autoescape=True)
++        res5 = engine.render_to_string('test.html', ctx3)
++        assert res5 == "Hello &lt;&gt;"
++
++    print("All tests passed.")
++
++if __name__ == '__main__':
++    run()
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 0000000000..5d5d05519f
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,5 @@
++Engine.render_to_string() should honor the autoescape attribute
++Description
++	
++In Engine.render_to_string, a Context is created without specifying the engine autoescape attribute. So if you create en engine with autoescape=False and then call its render_to_string() method, the result will always be autoescaped. It was probably overlooked in [19a5f6da329d58653bcda85].
++

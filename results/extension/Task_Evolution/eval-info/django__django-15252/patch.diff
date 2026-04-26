@@ -1,0 +1,300 @@
+diff --git a/REFLECTION_PROMPT_PATH b/REFLECTION_PROMPT_PATH
+new file mode 100644
+index 0000000000..8b13789179
+--- /dev/null
++++ b/REFLECTION_PROMPT_PATH
+@@ -0,0 +1 @@
++
+diff --git a/django/db/migrations/recorder.py b/django/db/migrations/recorder.py
+index 1a37c6b7d0..17b75603ee 100644
+--- a/django/db/migrations/recorder.py
++++ b/django/db/migrations/recorder.py
+@@ -1,5 +1,5 @@
+ from django.apps.registry import Apps
+-from django.db import DatabaseError, models
++from django.db import DatabaseError, models, router
+ from django.utils.functional import classproperty
+ from django.utils.timezone import now
+ 
+@@ -52,6 +52,8 @@ class MigrationRecorder:
+ 
+     def has_table(self):
+         """Return True if the django_migrations table exists."""
++        if not router.allow_migrate_model(self.connection.alias, self.Migration):
++            return False
+         with self.connection.cursor() as cursor:
+             tables = self.connection.introspection.table_names(cursor)
+         return self.Migration._meta.db_table in tables
+@@ -63,6 +65,8 @@ class MigrationRecorder:
+         if self.has_table():
+             return
+         # Make the table
++        if not router.allow_migrate_model(self.connection.alias, self.Migration):
++            return
+         try:
+             with self.connection.schema_editor() as editor:
+                 editor.create_model(self.Migration)
+@@ -84,13 +88,19 @@ class MigrationRecorder:
+     def record_applied(self, app, name):
+         """Record that a migration was applied."""
+         self.ensure_schema()
++        if not router.allow_migrate_model(self.connection.alias, self.Migration):
++            return
+         self.migration_qs.create(app=app, name=name)
+ 
+     def record_unapplied(self, app, name):
+         """Record that a migration was unapplied."""
+         self.ensure_schema()
++        if not router.allow_migrate_model(self.connection.alias, self.Migration):
++            return
+         self.migration_qs.filter(app=app, name=name).delete()
+ 
+     def flush(self):
+         """Delete all migration records. Useful for testing migrations."""
++        if not router.allow_migrate_model(self.connection.alias, self.Migration):
++            return
+         self.migration_qs.all().delete()
+diff --git a/edit_tool.py b/edit_tool.py
+new file mode 100755
+index 0000000000..92d1da9b17
+--- /dev/null
++++ b/edit_tool.py
+@@ -0,0 +1,40 @@
++#!/usr/bin/env python3
++import sys
++
++def main():
++    if len(sys.argv) < 3:
++        print("Usage: edit_tool.py <file_path> <mode> [args]")
++        return
++    
++    file_path = sys.argv[1]
++    mode = sys.argv[2]
++    
++    try:
++        with open(file_path, 'r') as f:
++            content = f.read()
++    except FileNotFoundError:
++        content = ""
++        
++    if mode == "append":
++        with open(file_path, 'a') as f:
++            f.write(sys.stdin.read())
++        print(f"Appended to {file_path}")
++    elif mode == "replace":
++        search_str = sys.argv[3]
++        replace_str = sys.stdin.read()
++        if search_str not in content:
++            print(f"Error: String not found in {file_path}")
++            return
++        content = content.replace(search_str, replace_str)
++        with open(file_path, 'w') as f:
++            f.write(content)
++        print(f"Replaced content in {file_path}")
++    elif mode == "write":
++        with open(file_path, 'w') as f:
++            f.write(sys.stdin.read())
++        print(f"Written to {file_path}")
++    else:
++        print("Invalid mode")
++
++if __name__ == "__main__":
++    main()
+diff --git a/fix_recorder.py b/fix_recorder.py
+new file mode 100644
+index 0000000000..2ab0dab371
+--- /dev/null
++++ b/fix_recorder.py
+@@ -0,0 +1,26 @@
++import sys
++
++with open("django/db/migrations/recorder.py", "r") as f:
++    content = f.read()
++
++replacement = """from django.db import DatabaseError, models, router"""
++content = content.replace("from django.db import DatabaseError, models", replacement)
++
++has_table_orig = """    def has_table(self):
++        \"\"\"Return True if the django_migrations table exists.\"\"\"
++        with self.connection.cursor() as cursor:
++            tables = self.connection.introspection.table_names(cursor)
++        return self.Migration._meta.db_table in tables"""
++
++has_table_new = """    @property
++    def has_table(self):
++        \"\"\"Return True if the django_migrations table exists.\"\"\"
++        class Migration(models.Model):""" # wait, let's keep has_table as a method
++
++has_table_new = """    def has_table(self):
++        \"\"\"Return True if the django_migrations table exists.\"\"\"
++        if self.has_table():
++            return True
++        return False"""
++
++pass
+diff --git a/patch_recorder.py b/patch_recorder.py
+new file mode 100644
+index 0000000000..e9a017ad80
+--- /dev/null
++++ b/patch_recorder.py
+@@ -0,0 +1,82 @@
++import os
++
++filepath = "django/db/migrations/recorder.py"
++with open(filepath, "r") as f:
++    content = f.read()
++
++# Add the router import
++content = content.replace(
++    "from django.db import DatabaseError, models",
++    "from django.db import DatabaseError, models, router"
++)
++
++# Update has_table
++has_table_old = """    def has_table(self):
++        \"\"\"Return True if the django_migrations table exists.\"\"\"
++        with self.connection.cursor() as cursor:"""
++has_table_new = """    def has_table(self):
++        \"\"\"Return True if the django_migrations table exists.\"\"\"
++        if not router.allow_migrate_model(self.connection.alias, self.Migration):
++            return False
++        with self.connection.cursor() as cursor:"""
++content = content.replace(has_table_old, has_table_new)
++
++# Update ensure_schema
++ensure_schema_old = """    def ensure_schema(self):
++        \"\"\"Ensure the table exists and has the correct schema.\"\"\"
++        # If the table's there, that's fine - we've never changed its schema
++        # in the codebase.
++        if self.has_table():
++            return
++        # Make the table"""
++ensure_schema_new = """    def ensure_schema(self):
++        \"\"\"Ensure the table exists and has the correct schema.\"\"\"
++        # If the table's there, that's fine - we've never changed its schema
++        # in the codebase.
++        if self.has_table():
++            return
++        # Make the table
++        if not router.allow_migrate_model(self.connection.alias, self.Migration):
++            return"""
++content = content.replace(ensure_schema_old, ensure_schema_new)
++
++# Update record_applied
++record_applied_old = """    def record_applied(self, app, name):
++        \"\"\"Record that a migration was applied.\"\"\"
++        self.ensure_schema()
++        self.migration_qs.create(app=app, name=name)"""
++record_applied_new = """    def record_applied(self, app, name):
++        \"\"\"Record that a migration was applied.\"\"\"
++        self.ensure_schema()
++        if not router.allow_migrate_model(self.connection.alias, self.Migration):
++            return
++        self.migration_qs.create(app=app, name=name)"""
++content = content.replace(record_applied_old, record_applied_new)
++
++# Update record_unapplied
++record_unapplied_old = """    def record_unapplied(self, app, name):
++        \"\"\"Record that a migration was unapplied.\"\"\"
++        self.ensure_schema()
++        self.migration_qs.filter(app=app, name=name).delete()"""
++record_unapplied_new = """    def record_unapplied(self, app, name):
++        \"\"\"Record that a migration was unapplied.\"\"\"
++        self.ensure_schema()
++        if not router.allow_migrate_model(self.connection.alias, self.Migration):
++            return
++        self.migration_qs.filter(app=app, name=name).delete()"""
++content = content.replace(record_unapplied_old, record_unapplied_new)
++
++# Update flush
++flush_old = """    def flush(self):
++        \"\"\"Delete all migration records. Useful for testing migrations.\"\"\"
++        self.migration_qs.all().delete()"""
++flush_new = """    def flush(self):
++        \"\"\"Delete all migration records. Useful for testing migrations.\"\"\"
++        if not router.allow_migrate_model(self.connection.alias, self.Migration):
++            return
++        self.migration_qs.all().delete()"""
++content = content.replace(flush_old, flush_new)
++
++with open(filepath, "w") as f:
++    f.write(content)
++
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 0000000000..d5e1a2dd0f
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,17 @@
++MigrationRecorder does not obey db_router allow_migrate rules
++Description
++	
++Hi,
++We have a multi-db setup. We have one connection that is for the django project, and several connections that talk to other dbs for information (ie models with managed = False). Django should only create tables in the first connection, never in any of the other connections. We have a simple router that does the following: 
++class Router(object):
++	def allow_migrate(self, db, model):
++		if db == 'default':
++			return True
++		return False
++Current Behaviour
++We run our functional tests and the migrate command is called against each connection when the test databases are created (see django/test/runner.py, setup_databases, line 300-ish, which calls django/db/backends/creation.py, create_test_db, line 377-ish)
++When this migrate runs, it tries to apply our migrations, which tries to record that a migration has been applied (see django/db/migrations/executor.py, apply_migration, which has several calls to self.recorder.record_applied). 
++The first thing that record_applied does is a call to self.ensure_schema() (see django/db/migrations/recorder.py, record_applied, lien 66-ish). 
++ensure_schema checks to see if the Migration model is in the tables in the connection. If it does not find the table then it tries to create the table. 
++I believe that this is incorrect behaviour when a db_router has been provided. If using the router above, my expectation would be that the table is not created on any connection other than the 'default' connection. Looking at the other methods on the MigrationRecorder, I would expect that there will be similar issues with applied_migrations and record_unapplied.
++
+diff --git a/test_script.py b/test_script.py
+new file mode 100644
+index 0000000000..a122e36f47
+--- /dev/null
++++ b/test_script.py
+@@ -0,0 +1,49 @@
++import os
++import sys
++
++if 'test_script' not in sys.modules:
++    import django
++    from django.conf import settings
++
++    if not settings.configured:
++        settings.configure(
++            DATABASES={
++                'default': {
++                    'ENGINE': 'django.db.backends.sqlite3',
++                    'NAME': ':memory:',
++                },
++                'other': {
++                    'ENGINE': 'django.db.backends.sqlite3',
++                    'NAME': ':memory:',
++                }
++            },
++            INSTALLED_APPS=[
++                'django.contrib.contenttypes',
++                'django.contrib.auth',
++            ],
++            DATABASE_ROUTERS=['test_script.Router']
++        )
++        django.setup()
++
++class Router(object):
++    def allow_migrate(self, db, app_label, **hints):
++        if db == 'default':
++            return True
++        return False
++
++if __name__ == "__main__":
++    from django.db.migrations.recorder import MigrationRecorder
++    from django.db import connections
++
++    recorder_default = MigrationRecorder(connections['default'])
++    print("Default has_table (before):", recorder_default.has_table())
++    recorder_default.ensure_schema()
++    print("Default has_table (after):", recorder_default.has_table())
++
++    recorder_other = MigrationRecorder(connections['other'])
++    print("Other has_table (before):", recorder_other.has_table())
++    try:
++        recorder_other.ensure_schema()
++        print("Other has_table (after):", recorder_other.has_table())
++    except Exception as e:
++        print("Error:", e)
