@@ -36,6 +36,7 @@ class AgentConfig:
     action_regex: str = r"```bash\s*\n(.*?)\n```"
     step_limit: int = 0
     cost_limit: float = 3.0
+    reflection_prompt: str = ""
 
 
 class NonTerminatingException(Exception):
@@ -70,6 +71,8 @@ class DefaultAgent:
         self.env = env
         self.extra_template_vars = {}
         self.n_task_description_edits = 0
+        self.n_reflection_prompt_edits = 0
+
 
     def render_template(self, template: str, **kwargs) -> str:
         template_vars = asdict(self.config) | self.env.get_template_vars() | self.model.get_template_vars()
@@ -87,10 +90,12 @@ class DefaultAgent:
         self.add_message("system", self.render_template(self.config.system_template))
         self.add_message("user", self.render_template(self.config.instance_template))
         
-        #This path to the file can be just passed as extra arg. This could be a generic json file as well.
         task_description_path = self.env.config.task_description_path
 
+        reflection_prompt_path = self.env.config.reflection_prompt_path
+
         self.create_file_in_env(task, task_description_path)
+        self.create_file_in_env(self.config.reflection_prompt , reflection_prompt_path)
 
         while True:
             try:
@@ -98,12 +103,16 @@ class DefaultAgent:
                     self.update_file(task_description_path)
                     self.n_task_description_edits += 1
 
+                if self.file_has_changed(reflection_prompt_path):
+                    self.update_file(reflection_prompt_path)
+                    self.n_reflection_prompt_edits += 1
+
                 self.step()
             except NonTerminatingException as e:
                 self.add_message("user", str(e))
             except TerminatingException as e:
                 self.add_message("user", str(e))
-                return type(e).__name__, str(e), {"n_task_description_edits" : self.n_task_description_edits, "final_task_description" : self.extra_template_vars["task"]}
+                return type(e).__name__, str(e), {"n_task_description_edits" : self.n_task_description_edits, "final_task_description" : self.extra_template_vars["task"], "n_reflection_prompt_edits" : self.n_reflection_prompt_edits, "final_reflection_prompt" : self.config.reflection_prompt}
 
     def step(self) -> dict:
         """Query the LM, execute the action, return the observation."""
@@ -114,7 +123,10 @@ class DefaultAgent:
         new_content = self.get_file_contents(path)
         
         if new_content != None:
-            self.extra_template_vars["task"] = new_content 
+            if "task" in path:
+                self.extra_template_vars["task"] = new_content
+            elif "reflection" in path:
+                self.config.reflection_prompt = new_content 
 
     def get_file_contents(self, path):
         command =  'cat ' + path
