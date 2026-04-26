@@ -1,0 +1,262 @@
+diff --git a/django/http/response.py b/django/http/response.py
+index 6a84e193ba..ea423bca90 100644
+--- a/django/http/response.py
++++ b/django/http/response.py
+@@ -229,7 +229,7 @@ class HttpResponseBase:
+         # Handle string types -- we can't rely on force_bytes here because:
+         # - Python attempts str conversion first
+         # - when self._charset != 'utf-8' it re-encodes the content
+-        if isinstance(value, bytes):
++        if isinstance(value, (bytes, memoryview)):
+             return bytes(value)
+         if isinstance(value, str):
+             return bytes(value.encode(self.charset))
+@@ -309,7 +309,7 @@ class HttpResponse(HttpResponseBase):
+     @content.setter
+     def content(self, value):
+         # Consume iterators upon assignment to allow repeated iteration.
+-        if hasattr(value, '__iter__') and not isinstance(value, (bytes, str)):
++        if hasattr(value, '__iter__') and not isinstance(value, (bytes, memoryview, str)):
+             content = b''.join(self.make_bytes(chunk) for chunk in value)
+             if hasattr(value, 'close'):
+                 try:
+diff --git a/edit_tool.py b/edit_tool.py
+new file mode 100644
+index 0000000000..c007a9acf5
+--- /dev/null
++++ b/edit_tool.py
+@@ -0,0 +1,37 @@
++import sys
++
++def modify_file():
++    filepath = "django/http/response.py"
++    with open(filepath, "r") as f:
++        content = f.read()
++
++    # Modify content.setter
++    old_setter = "if hasattr(value, '__iter__') and not isinstance(value, (bytes, str)):"
++    new_setter = "if hasattr(value, '__iter__') and not isinstance(value, (bytes, memoryview, str)):"
++    if old_setter in content:
++        content = content.replace(old_setter, new_setter)
++        print("Updated content.setter")
++    elif new_setter in content:
++        print("content.setter already updated")
++    else:
++        print("Could not find content.setter line!")
++
++    # make_bytes was already modified by my previous sed command!
++    # Let's ensure it has memoryview properly
++    old_make_bytes = "if isinstance(value, bytes):"
++    new_make_bytes = "if isinstance(value, (bytes, memoryview)):"
++    
++    # Check if sed applied it correctly
++    if new_make_bytes in content:
++        print("make_bytes is already updated to handle memoryview.")
++    elif old_make_bytes in content:
++        content = content.replace(old_make_bytes, new_make_bytes)
++        print("Updated make_bytes")
++    else:
++        print("Could not find make_bytes line!")
++
++    with open(filepath, "w") as f:
++        f.write(content)
++
++if __name__ == "__main__":
++    modify_file()
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..f74c6daf6c
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,5 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task, if you have learned any additional information about the task that should be added to the task description, or if there are any modifications you can make to the relfection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Note that the task description can be changed by modifying the task_description.txt file directly.
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want.
++
+diff --git a/reproduce.py b/reproduce.py
+new file mode 100644
+index 0000000000..044a733a01
+--- /dev/null
++++ b/reproduce.py
+@@ -0,0 +1,26 @@
++import sys
++import os
++import django
++from django.conf import settings
++
++settings.configure(
++    DEFAULT_CHARSET='utf-8',
++)
++django.setup()
++
++from django.http import HttpResponse
++
++response1 = HttpResponse("My Content")
++print("String content:", response1.content)
++
++response2 = HttpResponse(b"My Content")
++print("Bytes content:", response2.content)
++
++response3 = HttpResponse(memoryview(b"My Content"))
++print("memoryview content:", response3.content)
++
++if response3.content != b"My Content":
++    print("FAILED: memoryview content is incorrect")
++    sys.exit(1)
++else:
++    print("SUCCESS")
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 0000000000..e9c9a955e0
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,21 @@
++HttpResponse doesn't handle memoryview objects
++Description
++	
++I am trying to write a BinaryField retrieved from the database into a HttpResponse. When the database is Sqlite this works correctly, but Postgresql returns the contents of the field as a memoryview object and it seems like current Django doesn't like this combination:
++from django.http import HttpResponse																	 
++# String content
++response = HttpResponse(My Content)																			
++response.content																								 
++# Out: b'My Content'
++# This is correct
++# Bytes content
++response = HttpResponse(bMy Content)																		 
++response.content																								 
++# Out: b'My Content'
++# This is also correct
++# memoryview content
++response = HttpResponse(memoryview(bMy Content))															 
++response.content
++# Out: b'<memory at 0x7fcc47ab2648>'
++# This is not correct, I am expecting b'My Content'
++
+diff --git a/test_bytearray.py b/test_bytearray.py
+new file mode 100644
+index 0000000000..94a28ff35b
+--- /dev/null
++++ b/test_bytearray.py
+@@ -0,0 +1,14 @@
++value = bytearray(b"My Content")
++print("hasattr __iter__:", hasattr(value, '__iter__'))
++print("isinstance (bytes, str):", isinstance(value, (bytes, str)))
++
++class MockHttpResponse:
++    def make_bytes(self, value):
++        if isinstance(value, bytes):
++            return bytes(value)
++        if isinstance(value, str):
++            return bytes(value.encode('utf-8'))
++        return str(value).encode('utf-8')
++
++response = MockHttpResponse()
++print("make_bytes(value):", response.make_bytes(value))
+diff --git a/test_memoryview.py b/test_memoryview.py
+new file mode 100644
+index 0000000000..320043c31f
+--- /dev/null
++++ b/test_memoryview.py
+@@ -0,0 +1,14 @@
++value = memoryview(b"My Content")
++print("hasattr __iter__:", hasattr(value, '__iter__'))
++print("isinstance (bytes, str):", isinstance(value, (bytes, str)))
++
++class MockHttpResponse:
++    def make_bytes(self, value):
++        if isinstance(value, bytes):
++            return bytes(value)
++        if isinstance(value, str):
++            return bytes(value.encode('utf-8'))
++        return str(value).encode('utf-8')
++
++response = MockHttpResponse()
++print("make_bytes(value):", response.make_bytes(value))
+diff --git a/test_response.py b/test_response.py
+new file mode 100644
+index 0000000000..edef18b285
+--- /dev/null
++++ b/test_response.py
+@@ -0,0 +1,14 @@
++import sys
++import django
++from django.conf import settings
++
++settings.configure(DEFAULT_CHARSET='utf-8')
++django.setup()
++
++from django.http import HttpResponse
++
++for val, name in [(b"Content", "bytes"),
++                  (bytearray(b"Content"), "bytearray"),
++                  (memoryview(b"Content"), "memoryview")]:
++    r = HttpResponse(val)
++    print(f"{name}: {r.content}")
+diff --git a/test_type_checks.py b/test_type_checks.py
+new file mode 100644
+index 0000000000..cc037f4b14
+--- /dev/null
++++ b/test_type_checks.py
+@@ -0,0 +1,25 @@
++class MockHttpResponse:
++    def __init__(self, charset='utf-8'):
++        self.charset = charset
++        self._container = []
++
++    def make_bytes(self, value):
++        if isinstance(value, (bytes, memoryview)):
++            return bytes(value)
++        if isinstance(value, str):
++            return bytes(value.encode(self.charset))
++        return str(value).encode(self.charset)
++
++    def set_content(self, value):
++        if hasattr(value, '__iter__') and not isinstance(value, (bytes, memoryview, str)):
++            content = b''.join(self.make_bytes(chunk) for chunk in value)
++        else:
++            content = self.make_bytes(value)
++        self._container = [content]
++
++r = MockHttpResponse()
++r.set_content(memoryview(b"My Content"))
++print("memoryview:", r._container[0])
++
++r.set_content(bytearray(b"My Content"))
++print("bytearray:", r._container[0])
+diff --git a/test_type_checks2.py b/test_type_checks2.py
+new file mode 100644
+index 0000000000..f7510c5d58
+--- /dev/null
++++ b/test_type_checks2.py
+@@ -0,0 +1,30 @@
++class MockHttpResponse:
++    def __init__(self, charset='utf-8'):
++        self.charset = charset
++        self._container = []
++
++    def make_bytes(self, value):
++        if isinstance(value, bytes):
++            return bytes(value)
++        if isinstance(value, str):
++            return bytes(value.encode(self.charset))
++        # Handle memoryview and bytearray without str conversion
++        if isinstance(value, (memoryview, bytearray)):
++            return bytes(value)
++        return str(value).encode(self.charset)
++
++    def set_content(self, value):
++        if hasattr(value, '__iter__') and not isinstance(value, (bytes, memoryview, str)):
++            content = b''.join(self.make_bytes(chunk) for chunk in value)
++        else:
++            content = self.make_bytes(value)
++        self._container = [content]
++
++r = MockHttpResponse()
++r.set_content(memoryview(b"My Content"))
++print("memoryview:", r._container[0])
++
++# Since bytearray has __iter__ and is not in (bytes, memoryview, str),
++# it will iterate and use str(int). Let's see:
++r.set_content(bytearray(b"My Content"))
++print("bytearray:", r._container[0])
