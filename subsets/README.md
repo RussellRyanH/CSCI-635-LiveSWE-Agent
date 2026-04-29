@@ -1,0 +1,2 @@
+# Subsets
+This folder contains the problem subsets for SWE-bench. We created a script that takes in a CSV file containing the instances ids of SWE-bench problems, and then evaluates the agent only on those problems. The current .csv file in this folder contains the problem set we used in our experiments, but others can be created and run by generating a single column (named "instance_id") .csv with the names of the desired problems.
