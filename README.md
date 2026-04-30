@@ -13,11 +13,36 @@ This project contains all artifacts (with the exception of trajectories) generat
 
 - subsets - Contains csv files that list the instance names for the particular subset of problems from SWE-bench-verified we used in our experiments.
 
+## Installation
+If you want to work with the unaltered version of Live-SWE-Agent, first install mini-swe-agent following the instructions in the [Mini-SWE-agent Repo](https://github.com/SWE-agent/mini-swe-agent). *Be sure to install the v1 version. V2 is not compatible with Live-SWE-Agent.
+
+If you're using our modified version of mini-swe-agent in order to support task and reflection prompt evolution, clone our repository and then run `pip install -e .` from the main directory of our repository. 
+
+Follow the remaining installation steps regardless of which mini-swe-agent you installed.
+
+If you want to be able to run evaluations using SWE-bench, be sure to also install datasets using `pip install datasets`
+
+SWE-bench can be installed using the installation instructions in the [SWE-bench repository](https://github.com/SWE-bench/SWE-bench).
+
 ## Running Live-SWE-agent on SWE-bench
-TODO: outline the steps to run our evals using the scripts
+In order to benchmark the performance of Live-SWE-Agent (both the default version and the one with our modifications), we have provided a script to simplify the process of running the subset of SWE-Bench problems that we use in our research.
+
+The script can be executed in the command line with the following syntax:
+
+`run_subset.sh   PATH_TO_CONFIGURATION_FILE   PATH_TO_CSV_FILE_OF_SWE_BENCH_INSTANCES   <PATH_TO_OUTPUT_DIRECTORY>   <REDO_EXISTING_INSTANCES>`
+
+Arguments encased in <> are optional. If no run directory is specified, a runs directory will be created in the current working directory. If the redo_existing_instances flag is left unspecified, it will default to false. 
 
 ## Evaluating the SWE-bench Predictions
-TODO: Outline the steps to evaluate the results 
+Once the agent has finished processing all of the SWE-Bench issues, its performance can be evaluated using the following input on the command line:
+
+` python -m swebench.harness.run_evaluation     --dataset_name SWE-bench/SWE-bench_Verified     --predictions_path PATH_TO_PREDS.JSON_FILE     --run_id UNIQUE_RUN_ID `
+
+If you want more statistics such as how much each instance cost and how many API calls were used, you can use the get_model_stats.py script as follows:
+
+`python get_model_stats.py PATH_TO_DIRECTORY_CONTAINING_RUN_OUTPUTS`
+
+This will generate a CSV file containing the stats broken down for each instance. The file is stored in the directory provided in the input.
 
 ## Additional Documentation
 This project spans multiple different existing repo including mini-swe-agent, live-swe-agent, and swe-bench. Below is a summary of all documentation links we found useful in replicating this work.
