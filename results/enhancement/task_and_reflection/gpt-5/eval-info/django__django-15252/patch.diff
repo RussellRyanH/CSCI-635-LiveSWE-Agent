@@ -1,0 +1,122 @@
+diff --git a/django/db/migrations/recorder.py b/django/db/migrations/recorder.py
+index 1a37c6b7d0..b1fc38ea33 100644
+--- a/django/db/migrations/recorder.py
++++ b/django/db/migrations/recorder.py
+@@ -1,5 +1,5 @@
+ from django.apps.registry import Apps
+-from django.db import DatabaseError, models
++from django.db import DatabaseError, models, router
+ from django.utils.functional import classproperty
+ from django.utils.timezone import now
+ 
+@@ -50,6 +50,11 @@ class MigrationRecorder:
+     def migration_qs(self):
+         return self.Migration.objects.using(self.connection.alias)
+ 
++    def _router_allows_migrate(self):
++        # Check router permission for migrations table on this connection.
++        return router.allow_migrate_model(self.connection.alias, self.Migration)
++
++
+     def has_table(self):
+         """Return True if the django_migrations table exists."""
+         with self.connection.cursor() as cursor:
+@@ -58,6 +63,10 @@ class MigrationRecorder:
+ 
+     def ensure_schema(self):
+         """Ensure the table exists and has the correct schema."""
++        # Respect database routers: don't create the table if migrations
++        # shouldn't run on this database.
++        if not self._router_allows_migrate():
++            return
+         # If the table's there, that's fine - we've never changed its schema
+         # in the codebase.
+         if self.has_table():
+@@ -69,11 +78,18 @@ class MigrationRecorder:
+         except DatabaseError as exc:
+             raise MigrationSchemaMissing("Unable to create the django_migrations table (%s)" % exc)
+ 
++
++
++
+     def applied_migrations(self):
+         """
+         Return a dict mapping (app_name, migration_name) to Migration instances
+         for all applied migrations.
+         """
++        # If the router doesn't allow migrations on this DB, treat as if none
++        # are applied and avoid any implicit creation.
++        if not self._router_allows_migrate():
++            return {}
+         if self.has_table():
+             return {(migration.app, migration.name): migration for migration in self.migration_qs}
+         else:
+@@ -83,14 +99,20 @@ class MigrationRecorder:
+ 
+     def record_applied(self, app, name):
+         """Record that a migration was applied."""
++        if not self._router_allows_migrate():
++            return
+         self.ensure_schema()
+         self.migration_qs.create(app=app, name=name)
+ 
+     def record_unapplied(self, app, name):
+         """Record that a migration was unapplied."""
++        if not self._router_allows_migrate():
++            return
+         self.ensure_schema()
+         self.migration_qs.filter(app=app, name=name).delete()
+ 
+     def flush(self):
+         """Delete all migration records. Useful for testing migrations."""
++        if not self._router_allows_migrate():
++            return
+         self.migration_qs.all().delete()
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..71b245e72b
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,10 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task, if you have learned any additional information about the task that should be added to the task description, or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Note that the task description can be changed by modifying the task_description.txt file directly. Anytime you execute commands that provide insight into the issue you are solving, you MUST add these insights to the task description before proceeding!
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++
++Remember to: 1) Use django.db.router.allow_migrate to gate MigrationRecorder.ensure_schema and related methods; 2) Ensure no migration table is created on non-default DBs per router; 3) Adjust applied_migrations and record_unapplied similarly.
++
++Reminder: Verify multi-DB behaviors by running a subset of migrations/router tests; ensure no schema creation on disallowed DBs.
++Reminder: When adding guards, scope replacements to the target function to avoid unintended edits elsewhere.
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 0000000000..a4de59b06d
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,26 @@
++MigrationRecorder does not obey db_router allow_migrate rules
++Description
++	
++Hi,
++We have a multi-db setup. We have one connection that is for the django project, and several connections that talk to other dbs for information (ie models with managed = False). Django should only create tables in the first connection, never in any of the other connections. We have a simple router that does the following: 
++class Router(object):
++	def allow_migrate(self, db, model):
++		if db == 'default':
++			return True
++		return False
++Current Behaviour
++We run our functional tests and the migrate command is called against each connection when the test databases are created (see django/test/runner.py, setup_databases, line 300-ish, which calls django/db/backends/creation.py, create_test_db, line 377-ish)
++When this migrate runs, it tries to apply our migrations, which tries to record that a migration has been applied (see django/db/migrations/executor.py, apply_migration, which has several calls to self.recorder.record_applied). 
++The first thing that record_applied does is a call to self.ensure_schema() (see django/db/migrations/recorder.py, record_applied, lien 66-ish). 
++ensure_schema checks to see if the Migration model is in the tables in the connection. If it does not find the table then it tries to create the table. 
++I believe that this is incorrect behaviour when a db_router has been provided. If using the router above, my expectation would be that the table is not created on any connection other than the 'default' connection. Looking at the other methods on the MigrationRecorder, I would expect that there will be similar issues with applied_migrations and record_unapplied.
++
++
++Notes: Located MigrationRecorder in django/db/migrations/recorder.py and executor in django/db/migrations/executor.py to apply router checks for allow_migrate before ensure_schema and recording applied/unapplied. Issue: Recorder currently unconditionally ensures schema on any connection.
++
++Insight: Need to update MigrationRecorder.ensure_schema(), applied_migrations(), record_applied(), record_unapplied(), and flush() to respect router.allow_migrate for the connection, preventing table creation and writes when disallowed.
++
++Insight: MigrationRecorder now respects routers via router.allow_migrate_model(self.connection.alias, self.Migration). ensure_schema no-ops when disallowed; applied_migrations returns {}; record_applied/record_unapplied/flush are no-ops when disallowed to avoid creating/using django_migrations on non-default DBs.
++Fix: Corrected MigrationRecorder.ensure_schema() to remove mistaken 'return {}' guard; replaced applied_migrations() to include proper router gating and original logic.
++
++Research: Searched tests for MigrationRecorder, django_migrations, and allow_migrate to find targeted tests for verification after implementing router-aware gating in MigrationRecorder.

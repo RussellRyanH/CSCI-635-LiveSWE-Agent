@@ -1,0 +1,102 @@
+diff --git a/django/core/management/__init__.py b/django/core/management/__init__.py
+index 5f2e64761e..e385b78188 100644
+--- a/django/core/management/__init__.py
++++ b/django/core/management/__init__.py
+@@ -136,6 +136,43 @@ def call_command(command_name, *args, **options):
+         '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
+         for opt in parser_actions if opt.required and opt.dest in options
+     ]
++
++    # Additionally, handle required mutually exclusive groups. If any option
++    # provided via **options belongs to a required mutually exclusive group,
++    # it must also be passed via parse_args() so that argparse recognizes the
++    # group as satisfied.
++    def get_mutually_exclusive_groups(parser):
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_mutually_exclusive_groups(sub_opt)
++        # Yield groups defined on this parser, if any.
++        for group in getattr(parser, '_mutually_exclusive_groups', []):
++            yield group
++
++    # Build a set of flags already present in parse_args to avoid duplicates.
++    present_flags = {a.split('=')[0] for a in parse_args if isinstance(a, str) and a.startswith('-')}
++    group_required_args = []
++    for group in get_mutually_exclusive_groups(parser):
++        if getattr(group, 'required', False):
++            for action in getattr(group, '_group_actions', []):
++                # Only consider options that have option strings and are provided via kwargs.
++                if action.option_strings and action.dest in options:
++                    flag = min(action.option_strings)
++                    if flag in present_flags:
++                        continue
++                    # If the action takes no arguments (e.g., store_true/false), only add the flag
++                    # when the provided value is truthy; argparse expects just the flag with no value.
++                    value = arg_options[action.dest]
++                    if getattr(action, 'nargs', None) in (0,):
++                        if value:
++                            group_required_args.append(flag)
++                            present_flags.add(flag)
++                    else:
++                        group_required_args.append('{}={}'.format(flag, value))
++                        present_flags.add(flag)
++    parse_args += group_required_args
++
+     defaults = parser.parse_args(args=parse_args)
+     defaults = dict(defaults._get_kwargs(), **arg_options)
+     # Raise an error if any unknown options were passed.
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..183e0c9bde
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,8 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task, if you have learned any additional information about the task that should be added to the task description, or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Note that the task description can be changed by modifying the task_description.txt file directly. Anytime you execute commands that provide insight into the issue you are solving, you MUST add these insights to the task description before proceeding!
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding!
++
++- Remember to update task_description.txt whenever insights are gained from reading code or running commands.
++- When fixing call_command, ensure handling of required mutually exclusive groups across subparsers by recursively collecting groups.
++- Prefer using arg_options (dest-normalized) when checking kwargs membership to avoid alias issues.
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 0000000000..313f3f8e46
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,34 @@
++call_command fails when argument of required mutually exclusive group is passed in kwargs.
++Description
++	
++This error 
++django.core.management.base.CommandError: Error: one of the arguments --shop-id --shop is required
++is raised when I run 
++call_command('my_command', shop_id=1)
++the argument 'shop_id' is part of a required mutually exclusive group:
++shop = parser.add_mutually_exclusive_group(required=True)
++shop.add_argument('--shop-id', nargs='?', type=int, default=None, dest='shop_id')
++shop.add_argument('--shop', nargs='?', type=str, default=None, dest='shop_name')
++However, everything is fine when I call this command in this way:
++call_command('my_command, '--shop-id=1')
++In django sources I found that only those keyword arguments of call_command are passed to the parser that are defined as required:
++# Any required arguments which are passed in via '**options' must be passed
++# to parse_args().
++parse_args += [
++	'{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++	for opt in parser._actions if opt.required and opt.dest in options
++]
++but in this special case both of them individually are not required, they are actually part of a group that is required. And the code of call_command does nothing with groups defined in the parser.
++
++Additional insights (from code inspection):
++- call_command constructs arg_options and parse_args in django/core/management/__init__.py.
++- It gathers actions via a recursive get_actions(parser) over subparsers.
++- It only forwards to parse_args those kwargs corresponding to actions where opt.required is True:
++  parse_args += ['{}={}'.format(min(opt.option_strings), arg_options[opt.dest]) for opt in parser_actions if opt.required and opt.dest in options]
++- There is no handling for required mutually exclusive groups (parser._mutually_exclusive_groups or subparser groups), so kwargs that satisfy a required group are not forwarded, causing argparse to think the required group is missing.
++- Needed fix: also detect required mutually exclusive groups and, when a member action's dest is present in kwargs, forward that option to parse_args similarly to individually required options.
++
++Verification and fix status:
++- Reproduced the failure using a minimal BaseCommand with a required mutually exclusive group and calling call_command(cmd, shop_id=1). It raised CommandError as described.
++- Implemented a fix in django/core/management/__init__.py: call_command now also forwards kwargs that satisfy required mutually exclusive groups to parse_args(), discovered by recursively visiting _mutually_exclusive_groups across the parser and subparsers.
++- After the patch, the same reproduction succeeds: handle() is called and returns the expected result.
