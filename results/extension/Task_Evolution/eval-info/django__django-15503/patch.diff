@@ -1,0 +1,758 @@
+diff --git a/REFLECTION_PROMPT_PATH b/REFLECTION_PROMPT_PATH
+new file mode 100644
+index 0000000000..8b13789179
+--- /dev/null
++++ b/REFLECTION_PROMPT_PATH
+@@ -0,0 +1 @@
++
+diff --git a/django/db/models/fields/json.py b/django/db/models/fields/json.py
+index fdca700c9d..3fd2621a0e 100644
+--- a/django/db/models/fields/json.py
++++ b/django/db/models/fields/json.py
+@@ -193,11 +193,22 @@ class HasKeyLookup(PostgresOperatorLookup):
+                 *_, rhs_key_transforms = key.preprocess_lhs(compiler, connection)
+             else:
+                 rhs_key_transforms = [key]
++            
++            if getattr(self, "compile_rhs", True) or isinstance(key, KeyTransform):
++                rhs_path = compile_json_path(rhs_key_transforms, include_root=False)
++            else:
++                rhs_path = "".join(
++                    [
++                        ".%s" % json.dumps(str(t))
++                        for t in rhs_key_transforms
++                    ]
++                )
++
+             rhs_params.append(
+                 "%s%s"
+                 % (
+                     lhs_json_path,
+-                    compile_json_path(rhs_key_transforms, include_root=False),
++                    rhs_path,
+                 )
+             )
+         # Add condition for each key.
+@@ -233,12 +244,14 @@ class HasKeyLookup(PostgresOperatorLookup):
+ 
+ 
+ class HasKey(HasKeyLookup):
++    compile_rhs = False
+     lookup_name = "has_key"
+     postgres_operator = "?"
+     prepare_rhs = False
+ 
+ 
+ class HasKeys(HasKeyLookup):
++    compile_rhs = False
+     lookup_name = "has_keys"
+     postgres_operator = "?&"
+     logical_operator = " AND "
+@@ -248,6 +261,7 @@ class HasKeys(HasKeyLookup):
+ 
+ 
+ class HasAnyKeys(HasKeys):
++    compile_rhs = False
+     lookup_name = "has_any_keys"
+     postgres_operator = "?|"
+     logical_operator = " OR "
+@@ -387,10 +401,7 @@ class KeyTransformTextLookupMixin:
+ class KeyTransformIsNull(lookups.IsNull):
+     # key__isnull=False is the same as has_key='key'
+     def as_oracle(self, compiler, connection):
+-        sql, params = HasKey(
+-            self.lhs.lhs,
+-            self.lhs.key_name,
+-        ).as_oracle(compiler, connection)
++        sql, params = (lambda h: setattr(h, 'compile_rhs', True) or h)(HasKey(self.lhs.lhs, self.lhs.key_name)).as_oracle(compiler, connection)
+         if not self.rhs:
+             return sql, params
+         # Column doesn't have a key or IS NULL.
+@@ -401,7 +412,7 @@ class KeyTransformIsNull(lookups.IsNull):
+         template = "JSON_TYPE(%s, %%s) IS NULL"
+         if not self.rhs:
+             template = "JSON_TYPE(%s, %%s) IS NOT NULL"
+-        return HasKey(self.lhs.lhs, self.lhs.key_name).as_sql(
++        return (lambda h: setattr(h, 'compile_rhs', True) or h)(HasKey(self.lhs.lhs, self.lhs.key_name)).as_sql(
+             compiler,
+             connection,
+             template=template,
+diff --git a/fix_json_py.py b/fix_json_py.py
+new file mode 100644
+index 0000000000..96381c745f
+--- /dev/null
++++ b/fix_json_py.py
+@@ -0,0 +1,49 @@
++import os
++
++path = 'django/db/models/fields/json.py'
++with open(path, 'r') as f:
++    content = f.read()
++
++# We want to replace compile_json_path(rhs_key_transforms, include_root=False)
++# with a list comprehension that ensures all transforms are string keys.
++
++target = """            rhs_params.append(
++                "%s%s"
++                % (
++                    lhs_json_path,
++                    compile_json_path(rhs_key_transforms, include_root=False),
++                )
++            )"""
++
++replacement = """            rhs_params.append(
++                "%s%s"
++                % (
++                    lhs_json_path,
++                    compile_json_path(
++                        [str(t) for t in rhs_key_transforms], include_root=False
++                    ),
++                )
++            )"""
++# Wait, compile_json_path will STILL convert `str(t)` to `[t]` if it's digit-only!
++# Let's replace the whole append call.
++
++replacement = """            rhs_params.append(
++                "%s%s"
++                % (
++                    lhs_json_path,
++                    "".join(
++                        [
++                            ".%s" % json.dumps(str(t))
++                            for t in rhs_key_transforms
++                        ]
++                    ),
++                )
++            )"""
++
++if target in content:
++    content = content.replace(target, replacement)
++    with open(path, 'w') as f:
++        f.write(content)
++    print("Fix applied.")
++else:
++    print("Target not found. Let's look for something close.")
+diff --git a/patch_json_py.py b/patch_json_py.py
+new file mode 100644
+index 0000000000..ab38a395c4
+--- /dev/null
++++ b/patch_json_py.py
+@@ -0,0 +1,93 @@
++import os
++
++path = 'django/db/models/fields/json.py'
++with open(path, 'r') as f:
++    content = f.read()
++
++# Replace my previous fix in HasKeyLookup.as_sql
++target1 = """            rhs_params.append(
++                "%s%s"
++                % (
++                    lhs_json_path,
++                    "".join(
++                        [
++                            ".%s" % json.dumps(str(t))
++                            for t in rhs_key_transforms
++                        ]
++                    ),
++                )
++            )"""
++
++replacement1 = """            if getattr(self, "compile_rhs", True):
++                rhs_path = compile_json_path(rhs_key_transforms, include_root=False)
++            else:
++                rhs_path = "".join(
++                    [
++                        ".%s" % json.dumps(str(t))
++                        for t in rhs_key_transforms
++                    ]
++                )
++            rhs_params.append(
++                "%s%s"
++                % (
++                    lhs_json_path,
++                    rhs_path,
++                )
++            )"""
++
++# In HasKey, HasKeys, HasAnyKeys we set compile_rhs = False
++target2 = """class HasKey(HasKeyLookup):"""
++replacement2 = """class HasKey(HasKeyLookup):
++    compile_rhs = False"""
++
++target3 = """class HasKeys(HasKeyLookup):"""
++replacement3 = """class HasKeys(HasKeyLookup):
++    compile_rhs = False"""
++
++target4 = """class HasAnyKeys(HasKeys):"""
++replacement4 = """class HasAnyKeys(HasKeys):
++    compile_rhs = False"""
++
++# In KeyTransformIsNull we create a HasKey subclass with compile_rhs = True
++target5 = """    def as_oracle(self, compiler, connection):
++        sql, params = HasKey("""
++replacement5 = """    def as_oracle(self, compiler, connection):
++        has_key = HasKey(
++            self.lhs.lhs,
++            self.lhs.key_name,
++        )
++        has_key.compile_rhs = True
++        sql, params = has_key.as_oracle(compiler, connection)"""
++
++target6 = """    def as_sqlite(self, compiler, connection):
++        template = "JSON_TYPE(%s, %%s) IS NULL"
++        if not self.rhs:
++            template = "JSON_TYPE(%s, %%s) IS NOT NULL"
++        return HasKey(self.lhs.lhs, self.lhs.key_name).as_sql("""
++replacement6 = """    def as_sqlite(self, compiler, connection):
++        template = "JSON_TYPE(%s, %%s) IS NULL"
++        if not self.rhs:
++            template = "JSON_TYPE(%s, %%s) IS NOT NULL"
++        has_key = HasKey(self.lhs.lhs, self.lhs.key_name)
++        has_key.compile_rhs = True
++        return has_key.as_sql("""
++
++content = content.replace(target1, replacement1)
++content = content.replace(target2, replacement2)
++content = content.replace(target3, replacement3)
++content = content.replace(target4, replacement4)
++# Wait, HasKey() usage in as_oracle might span multiple lines
++# Let's use regex or string replace for KeyTransformIsNull
++
++import re
++content = re.sub(r"HasKey\(\s*self\.lhs\.lhs,\s*self\.lhs\.key_name,\s*\)\.as_oracle\((.*?)\)",
++                 r"(lambda h: setattr(h, 'compile_rhs', True) or h)(HasKey(self.lhs.lhs, self.lhs.key_name)).as_oracle(\1)", 
++                 content, flags=re.DOTALL)
++
++content = re.sub(r"HasKey\(\s*self\.lhs\.lhs,\s*self\.lhs\.key_name\s*\)\.as_sql\(",
++                 r"(lambda h: setattr(h, 'compile_rhs', True) or h)(HasKey(self.lhs.lhs, self.lhs.key_name)).as_sql(", 
++                 content, flags=re.DOTALL)
++
++with open(path, 'w') as f:
++    f.write(content)
++print("Patch applied.")
+diff --git a/patch_json_py2.py b/patch_json_py2.py
+new file mode 100644
+index 0000000000..e088e10e95
+--- /dev/null
++++ b/patch_json_py2.py
+@@ -0,0 +1,95 @@
++import os
++
++path = 'django/db/models/fields/json.py'
++with open(path, 'r') as f:
++    content = f.read()
++
++# First, revert the previous block for rhs_params.append
++# The previous block was:
++target1 = """            if getattr(self, "compile_rhs", True):
++                rhs_path = compile_json_path(rhs_key_transforms, include_root=False)
++            else:
++                rhs_path = "".join(
++                    [
++                        ".%s" % json.dumps(str(t))
++                        for t in rhs_key_transforms
++                    ]
++                )
++            rhs_params.append(
++                "%s%s"
++                % (
++                    lhs_json_path,
++                    rhs_path,
++                )
++            )"""
++
++# I need to find this exactly
++if target1 in content:
++    pass
++else:
++    print("Could not find target1")
++
++# Actually let's just restore original then apply new
++import subprocess
++subprocess.run(["git", "checkout", path])
++
++with open(path, 'r') as f:
++    content = f.read()
++
++target = """        for key in rhs:
++            if isinstance(key, KeyTransform):
++                *_, rhs_key_transforms = key.preprocess_lhs(compiler, connection)
++            else:
++                rhs_key_transforms = [key]
++            rhs_params.append(
++                "%s%s"
++                % (
++                    lhs_json_path,
++                    compile_json_path(rhs_key_transforms, include_root=False),
++                )
++            )"""
++
++replacement = """        for key in rhs:
++            if isinstance(key, KeyTransform):
++                *_, rhs_key_transforms = key.preprocess_lhs(compiler, connection)
++            else:
++                rhs_key_transforms = [key]
++            
++            if getattr(self, "compile_rhs", True) or isinstance(key, KeyTransform):
++                rhs_path = compile_json_path(rhs_key_transforms, include_root=False)
++            else:
++                rhs_path = "".join(
++                    [
++                        ".%s" % json.dumps(str(t))
++                        for t in rhs_key_transforms
++                    ]
++                )
++
++            rhs_params.append(
++                "%s%s"
++                % (
++                    lhs_json_path,
++                    rhs_path,
++                )
++            )"""
++
++content = content.replace(target, replacement)
++
++# Add compile_rhs = False
++content = content.replace("class HasKey(HasKeyLookup):", "class HasKey(HasKeyLookup):\n    compile_rhs = False")
++content = content.replace("class HasKeys(HasKeyLookup):", "class HasKeys(HasKeyLookup):\n    compile_rhs = False")
++content = content.replace("class HasAnyKeys(HasKeys):", "class HasAnyKeys(HasKeys):\n    compile_rhs = False")
++
++import re
++content = re.sub(r"HasKey\(\s*self\.lhs\.lhs,\s*self\.lhs\.key_name,\s*\)\.as_oracle\((.*?)\)",
++                 r"(lambda h: setattr(h, 'compile_rhs', True) or h)(HasKey(self.lhs.lhs, self.lhs.key_name)).as_oracle(\1)", 
++                 content, flags=re.DOTALL)
++
++content = re.sub(r"HasKey\(\s*self\.lhs\.lhs,\s*self\.lhs\.key_name\s*\)\.as_sql\(",
++                 r"(lambda h: setattr(h, 'compile_rhs', True) or h)(HasKey(self.lhs.lhs, self.lhs.key_name)).as_sql(", 
++                 content, flags=re.DOTALL)
++
++with open(path, 'w') as f:
++    f.write(content)
++
++print("Patch applied.")
+diff --git a/patch_tests.py b/patch_tests.py
+new file mode 100644
+index 0000000000..dc0a420d48
+--- /dev/null
++++ b/patch_tests.py
+@@ -0,0 +1,29 @@
++import os
++
++path = 'tests/model_fields/test_jsonfield.py'
++with open(path, 'r') as f:
++    content = f.read()
++
++test_method = """
++    def test_has_key_number(self):
++        NullableJSONModel.objects.create(value={'1111': 'bar'})
++        NullableJSONModel.objects.create(value={'foo': 'bar'})
++        self.assertEqual(NullableJSONModel.objects.filter(value__has_key='1111').count(), 1)
++        self.assertEqual(NullableJSONModel.objects.filter(value__has_key='foo').count(), 1)
++"""
++
++# Insert it inside TestQuerying class
++class_def = "class TestQuerying("
++pos = content.find(class_def)
++if pos != -1:
++    end_of_class = content.find("class ", pos + len(class_def))
++    if end_of_class != -1:
++        # insert before the next class
++        new_content = content[:end_of_class] + test_method + "\n" + content[end_of_class:]
++        with open(path, 'w') as f:
++            f.write(new_content)
++        print("Patched test file")
++    else:
++        print("Couldn't find end of class")
++else:
++    print("Couldn't find TestQuerying class")
+diff --git a/patch_tests2.py b/patch_tests2.py
+new file mode 100644
+index 0000000000..b11ae0b9f8
+--- /dev/null
++++ b/patch_tests2.py
+@@ -0,0 +1,28 @@
++import os
++
++path = 'tests/model_fields/test_jsonfield.py'
++with open(path, 'r') as f:
++    content = f.read()
++
++test_method = """
++    def test_has_key_number(self):
++        NullableJSONModel.objects.create(value={'1111': 'bar'})
++        NullableJSONModel.objects.create(value={'foo': 'bar'})
++        self.assertEqual(NullableJSONModel.objects.filter(value__has_key='1111').count(), 1)
++        self.assertEqual(NullableJSONModel.objects.filter(value__has_key='foo').count(), 1)
++
++    def test_has_key_number_list(self):
++        NullableJSONModel.objects.create(value={'1111': 'bar'})
++        self.assertEqual(NullableJSONModel.objects.filter(value__has_keys=['1111']).count(), 1)
++        self.assertEqual(NullableJSONModel.objects.filter(value__has_any_keys=['1111']).count(), 1)
++"""
++
++pos = content.find("def test_has_any_keys(")
++if pos != -1:
++    pos_end = content.find("\n    def ", pos)
++    new_content = content[:pos_end] + "\n" + test_method + content[pos_end:]
++    with open(path, 'w') as f:
++        f.write(new_content)
++    print("Patched test file successfully")
++else:
++    print("Couldn't find def test_has_any_keys")
+diff --git a/run_json_tests.py b/run_json_tests.py
+new file mode 100644
+index 0000000000..d4e3a89909
+--- /dev/null
++++ b/run_json_tests.py
+@@ -0,0 +1,24 @@
++import sys
++import django
++from django.conf import settings
++from django.test.utils import get_runner
++
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'tests.model_fields',
++    ],
++    USE_TZ=False,
++)
++django.setup()
++
++TestRunner = get_runner(settings)
++test_runner = TestRunner(verbosity=2)
++failures = test_runner.run_tests(['tests.model_fields.test_jsonfield'])
++sys.exit(bool(failures))
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 0000000000..fadf998fb6
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,47 @@
++has_key, has_keys, and has_any_keys JSONField() lookups don't handle numeric keys on SQLite, MySQL, and Oracle.
++Description
++	 
++		(last modified by TheTerrasque)
++	 
++Problem
++When using models.​JSONField() ​has_key lookup with numerical keys on SQLite database it fails to find the keys.
++Versions:
++Django: 4.0.3
++Python: 3.9.6 (tags/v3.9.6:db3ff76, Jun 28 2021, 15:26:21) [MSC v.1929 64 bit (AMD64)] on win32
++sqlite3.version: '2.6.0'
++sqlite3.sqlite_version: '3.35.5'
++Example:
++Database
++DATABASES = {
++	'default': {
++		'ENGINE': 'django.db.backends.sqlite3',
++		'NAME': 'db.sqlite3',
++	}
++}
++Model
++class JsonFieldHasKeyTest(models.Model):
++	data = models.JSONField()
++Test
++from django.test import TestCase
++from .models import JsonFieldHasKeyTest
++class JsonFieldHasKeyTestCase(TestCase):
++	def setUp(self) -> None:
++		test = JsonFieldHasKeyTest(data={'foo': 'bar'})
++		test2 = JsonFieldHasKeyTest(data={'1111': 'bar'})
++		test.save()
++		test2.save()
++	def test_json_field_has_key(self):
++		c1 = JsonFieldHasKeyTest.objects.filter(data__has_key='foo').count()
++		c2 = JsonFieldHasKeyTest.objects.filter(data__has_key='1111').count()
++		self.assertEqual(c1, 1, Should have found 1 entry with key foo)
++		self.assertEqual(c2, 1, Should have found 1 entry with key 1111)
++Result
++FAIL: test_json_field_has_key (markers.tests.JsonFieldHasKeyTestCase)
++----------------------------------------------------------------------
++Traceback (most recent call last):
++ File H:FilesProjectsElectacoWebserviceelecservemarkerstests.py, line 16, in test_json_field_has_key	 
++	self.assertEqual(c2, 1, Should have found 1 entry with key 1111)
++AssertionError: 0 != 1 : Should have found 1 entry with key '1111'
++Additional info
++This has been tested on SQLite and Postgresql backend, it works on postgresql but fails on sqlite.
++
+diff --git a/test_final.py b/test_final.py
+new file mode 100644
+index 0000000000..d71646705c
+--- /dev/null
++++ b/test_final.py
+@@ -0,0 +1,46 @@
++import os
++import django
++from django.conf import settings
++from django.db import models, connection
++
++# Configure Django settings
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        '__main__',
++    ],
++)
++django.setup()
++
++# Define model
++class JsonFieldHasKeyTest(models.Model):
++    data = models.JSONField()
++
++    class Meta:
++        app_label = '__main__'
++
++# Create tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(JsonFieldHasKeyTest)
++
++# Test script
++test = JsonFieldHasKeyTest(data={'foo': 'bar'})
++test2 = JsonFieldHasKeyTest(data={'1111': 'bar'})
++test.save()
++test2.save()
++
++c1 = JsonFieldHasKeyTest.objects.filter(data__has_key='foo').count()
++c2 = JsonFieldHasKeyTest.objects.filter(data__has_key='1111').count()
++
++print(f"Count for 'foo': {c1}")
++print(f"Count for '1111': {c2}")
++
++if c1 == 1 and c2 == 1:
++    print("SUCCESS: Both keys found correctly.")
++else:
++    print("FAILURE: Keys not found correctly.")
+diff --git a/test_fix_has_key.py b/test_fix_has_key.py
+new file mode 100644
+index 0000000000..5274bf91d4
+--- /dev/null
++++ b/test_fix_has_key.py
+@@ -0,0 +1,7 @@
++import json
++
++def format_json_key(key):
++    return f".{json.dumps(str(key))}"
++
++print(format_json_key(1111))
++print(format_json_key("1111"))
+diff --git a/test_format.py b/test_format.py
+new file mode 100644
+index 0000000000..3f228e14d3
+--- /dev/null
++++ b/test_format.py
+@@ -0,0 +1,5 @@
++lhs = "table.column = %s"
++json_path = "$."
++template = "JSON_EXISTS(%s, '%s')"
++sql = template % (lhs, json_path)
++print(sql)
+diff --git a/test_has_key.py b/test_has_key.py
+new file mode 100644
+index 0000000000..105c441e7b
+--- /dev/null
++++ b/test_has_key.py
+@@ -0,0 +1,45 @@
++import os
++import django
++from django.conf import settings
++from django.db import models, connection
++
++# Configure Django settings
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        '__main__',
++    ],
++)
++django.setup()
++
++# Define model
++class JsonFieldHasKeyTest(models.Model):
++    data = models.JSONField()
++
++    class Meta:
++        app_label = '__main__'
++
++# Create tables
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(JsonFieldHasKeyTest)
++
++# Test script
++test = JsonFieldHasKeyTest(data={'foo': 'bar'})
++test2 = JsonFieldHasKeyTest(data={'1111': 'bar'})
++test.save()
++test2.save()
++
++print("Query for 'foo':")
++print(JsonFieldHasKeyTest.objects.filter(data__has_key='foo').query)
++c1 = JsonFieldHasKeyTest.objects.filter(data__has_key='foo').count()
++
++print("\nQuery for '1111':")
++print(JsonFieldHasKeyTest.objects.filter(data__has_key='1111').query)
++c2 = JsonFieldHasKeyTest.objects.filter(data__has_key='1111').count()
++
++print(f"\nc1: {c1}, c2: {c2}")
+diff --git a/test_has_key_pg.py b/test_has_key_pg.py
+new file mode 100644
+index 0000000000..ac3856d050
+--- /dev/null
++++ b/test_has_key_pg.py
+@@ -0,0 +1,14 @@
++import json
++def compile_json_path(key_transforms, include_root=True):
++    path = ["$"] if include_root else []
++    for key_transform in key_transforms:
++        try:
++            num = int(key_transform)
++        except ValueError:  # non-integer
++            path.append(".")
++            path.append(json.dumps(key_transform))
++        else:
++            path.append("[%s]" % num)
++    return "".join(path)
++
++print(compile_json_path(["1111"]))
+diff --git a/test_json_dumps.py b/test_json_dumps.py
+new file mode 100644
+index 0000000000..54e1ce6334
+--- /dev/null
++++ b/test_json_dumps.py
+@@ -0,0 +1,3 @@
++import json
++print(json.dumps(1111))
++print(json.dumps(str(1111)))
+diff --git a/test_json_dumps2.py b/test_json_dumps2.py
+new file mode 100644
+index 0000000000..4eb85e368a
+--- /dev/null
++++ b/test_json_dumps2.py
+@@ -0,0 +1,27 @@
++import json
++
++def original_compile_json_path(key_transforms, include_root=True):
++    path = ["$"] if include_root else []
++    for key_transform in key_transforms:
++        try:
++            num = int(key_transform)
++        except ValueError:  # non-integer
++            path.append(".")
++            path.append(json.dumps(key_transform))
++        else:
++            path.append("[%s]" % num)
++    return "".join(path)
++
++def new_compile_json_path(key_transforms):
++    return "".join(
++        [
++            ".%s" % json.dumps(str(t))
++            for t in key_transforms
++        ]
++    )
++
++print("Original 'a':", original_compile_json_path(['a'], include_root=False))
++print("New 'a':", new_compile_json_path(['a']))
++
++print("Original '1111':", original_compile_json_path(['1111'], include_root=False))
++print("New '1111':", new_compile_json_path(['1111']))
+diff --git a/test_key_transform_is_null.py b/test_key_transform_is_null.py
+new file mode 100644
+index 0000000000..9dbea37787
+--- /dev/null
++++ b/test_key_transform_is_null.py
+@@ -0,0 +1,15 @@
++import json
++
++def compile_json_path(key_transforms, include_root=True):
++    path = ["$"] if include_root else []
++    for key_transform in key_transforms:
++        try:
++            num = int(key_transform)
++        except ValueError:  # non-integer
++            path.append(".")
++            path.append(json.dumps(key_transform))
++        else:
++            path.append("[%s]" % num)
++    return "".join(path)
++
++print(compile_json_path(["d", "0"]))
+diff --git a/test_pg_array.py b/test_pg_array.py
+new file mode 100644
+index 0000000000..c0008dffb0
+--- /dev/null
++++ b/test_pg_array.py
+@@ -0,0 +1,10 @@
++import json
++
++def test():
++    # simulate what postgres does with ?
++    print("In postgres:")
++    print("['a', 'b'] ? 'a' -> True")
++    print("['a', 'b'] ? '0' -> False")
++    print("['a', 'b'] ? 0 -> Syntax error (must be string)")
++    
++test()
+diff --git a/test_sqlite_json_path.py b/test_sqlite_json_path.py
+new file mode 100644
+index 0000000000..5761d8d28c
+--- /dev/null
++++ b/test_sqlite_json_path.py
+@@ -0,0 +1,10 @@
++import sqlite3
++
++conn = sqlite3.connect(':memory:')
++c = conn.cursor()
++
++c.execute("SELECT json_type('{\"1111\": \"bar\"}', '$.\"1111\"')")
++print("SQLite JSON path $.\"1111\":", c.fetchone()[0])
++
++c.execute("SELECT json_type('{\"1111\": \"bar\"}', '$[1111]')")
++print("SQLite JSON path $[1111]:", c.fetchone()[0])
+diff --git a/view_file.py b/view_file.py
+new file mode 100644
+index 0000000000..1e7331703e
+--- /dev/null
++++ b/view_file.py
+@@ -0,0 +1,24 @@
++import sys
++
++def main():
++    if len(sys.argv) < 2:
++        print("Usage: python view_file.py <filename> [start_line] [end_line]")
++        sys.exit(1)
++        
++    filename = sys.argv[1]
++    start_line = int(sys.argv[2]) if len(sys.argv) > 2 else 1
++    end_line = int(sys.argv[3]) if len(sys.argv) > 3 else None
++    
++    try:
++        with open(filename, 'r') as f:
++            lines = f.readlines()
++            
++        end = end_line if end_line is not None else len(lines)
++        
++        for i in range(start_line - 1, min(end, len(lines))):
++            print(f"{i+1:4d} | {lines[i]}", end='')
++    except Exception as e:
++        print(f"Error reading file: {e}")
++
++if __name__ == "__main__":
++    main()

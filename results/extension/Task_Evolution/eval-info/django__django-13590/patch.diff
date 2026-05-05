@@ -1,0 +1,339 @@
+diff --git a/REFLECTION_PROMPT_PATH b/REFLECTION_PROMPT_PATH
+new file mode 100644
+index 0000000000..8b13789179
+--- /dev/null
++++ b/REFLECTION_PROMPT_PATH
+@@ -0,0 +1 @@
++
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index 4648daf395..e5adf8d35a 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -1077,10 +1077,14 @@ class Query(BaseExpression):
+         elif isinstance(value, (list, tuple)):
+             # The items of the iterable may be expressions and therefore need
+             # to be resolved independently.
+-            return type(value)(
++            values = (
+                 self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
+                 for sub_value in value
+             )
++            type_ = type(value)
++            if hasattr(type_, '_make'):
++                return type_(*values)
++            return type_(values)
+         return value
+ 
+     def solve_lookup_type(self, lookup):
+diff --git a/patch.py b/patch.py
+new file mode 100644
+index 0000000000..12f7dd9fde
+--- /dev/null
++++ b/patch.py
+@@ -0,0 +1,27 @@
++with open('django/db/models/sql/query.py', 'r') as f:
++    content = f.read()
++
++replacement = """        elif isinstance(value, (list, tuple)):
++            # The items of the iterable may be expressions and therefore need
++            # to be resolved independently.
++            values = (
++                self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
++                for sub_value in value
++            )
++            type_ = type(value)
++            if hasattr(type_, '_make'):
++                return type_(*values)
++            return type_(values)"""
++
++old_code = """        elif isinstance(value, (list, tuple)):
++            # The items of the iterable may be expressions and therefore need
++            # to be resolved independently.
++            return type(value)(
++                self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
++                for sub_value in value
++            )"""
++
++new_content = content.replace(old_code, replacement)
++
++with open('django/db/models/sql/query.py', 'w') as f:
++    f.write(new_content)
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 0000000000..73b158cefe
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,10 @@
++Upgrading 2.2>3.0 causes named tuples used as arguments to __range to error.
++Description
++	
++I noticed this while upgrading a project from 2.2 to 3.0.
++This project passes named 2-tuples as arguments to range queryset filters. This works fine on 2.2. On 3.0 it causes the following error: TypeError: __new__() missing 1 required positional argument: 'far'.
++This happens because django.db.models.sql.query.Query.resolve_lookup_value goes into the tuple elements to resolve lookups and then attempts to reconstitute the tuple with the resolved elements.
++When it attempts to construct the new tuple it preserves the type (the named tuple) but it passes a iterator to it's constructor.
++NamedTuples don't have the code path for copying an iterator, and so it errors on insufficient arguments.
++The fix is to * expand the contents of the iterator into the constructor.
++
+diff --git a/test_app/__init__.py b/test_app/__init__.py
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test_app/models.py b/test_app/models.py
+new file mode 100644
+index 0000000000..c67082e41b
+--- /dev/null
++++ b/test_app/models.py
+@@ -0,0 +1,7 @@
++
++from django.db import models
++
++class Item(models.Model):
++    value = models.IntegerField()
++    class Meta:
++        app_label = 'test_app'
+diff --git a/test_django_range.py b/test_django_range.py
+new file mode 100644
+index 0000000000..457761f033
+--- /dev/null
++++ b/test_django_range.py
+@@ -0,0 +1,50 @@
++import os
++import sys
++import django
++from django.conf import settings
++from collections import namedtuple
++
++BASE_DIR = os.path.dirname(os.path.abspath(__file__))
++sys.path.insert(0, BASE_DIR)
++
++os.makedirs('test_app', exist_ok=True)
++with open('test_app/__init__.py', 'w') as f:
++    pass
++with open('test_app/models.py', 'w') as f:
++    f.write('''
++from django.db import models
++
++class Item(models.Model):
++    value = models.IntegerField()
++    class Meta:
++        app_label = 'test_app'
++''')
++
++settings.configure(
++    DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}},
++    INSTALLED_APPS=['django.contrib.contenttypes', 'django.contrib.auth', 'test_app'],
++    SECRET_KEY='secret',
++)
++
++django.setup()
++
++from test_app.models import Item
++from django.db import connection
++
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(Item)
++
++Item.objects.create(value=1)
++Item.objects.create(value=2)
++Item.objects.create(value=3)
++
++RangeTuple = namedtuple('RangeTuple', ['start', 'end'])
++r = RangeTuple(1, 2)
++
++try:
++    qs = Item.objects.filter(value__range=r)
++    print("Result:", list(qs))
++except Exception as e:
++    import traceback
++    traceback.print_exc()
++
+diff --git a/test_resolve.py b/test_resolve.py
+new file mode 100644
+index 0000000000..fb3246375a
+--- /dev/null
++++ b/test_resolve.py
+@@ -0,0 +1,32 @@
++from collections import namedtuple
++
++class DummyQuery:
++    def resolve_lookup_value(self, value, can_reuse, allow_joins):
++        if hasattr(value, 'resolve_expression'):
++            return value.resolve_expression(self, reuse=can_reuse, allow_joins=allow_joins)
++        elif isinstance(value, (list, tuple)):
++            # The items of the iterable may be expressions and therefore need
++            # to be resolved independently.
++            resolved_values = (
++                self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
++                for sub_value in value
++            )
++            if hasattr(value, '_make'):
++                return type(value)(*resolved_values)
++            return type(value)(resolved_values)
++        return value
++
++q = DummyQuery()
++NT = namedtuple('NT', ['near', 'far'])
++
++nt = NT(1, 2)
++lst = [1, 2]
++tpl = (1, 2)
++
++for value in (nt, lst, tpl):
++    try:
++        res = q.resolve_lookup_value(value, False, False)
++        print(f"Success for {type(value).__name__}: {res}")
++    except Exception as e:
++        print(f"Error for {type(value).__name__}: {e}")
++
+diff --git a/test_resolve2.py b/test_resolve2.py
+new file mode 100644
+index 0000000000..f88dc0f3c8
+--- /dev/null
++++ b/test_resolve2.py
+@@ -0,0 +1,36 @@
++from collections import namedtuple
++
++class DummyQuery:
++    def resolve_lookup_value(self, value, can_reuse, allow_joins):
++        if hasattr(value, 'resolve_expression'):
++            return value.resolve_expression(self, reuse=can_reuse, allow_joins=allow_joins)
++        elif isinstance(value, (list, tuple)):
++            # The items of the iterable may be expressions and therefore need
++            # to be resolved independently.
++            resolved_values = (
++                self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
++                for sub_value in value
++            )
++            if type(value) in (list, tuple):
++                return type(value)(resolved_values)
++            elif hasattr(value, '_make'):
++                # Named tuples
++                return type(value)(*resolved_values)
++            else:
++                return type(value)(resolved_values)
++        return value
++
++q = DummyQuery()
++NT = namedtuple('NT', ['near', 'far'])
++
++nt = NT(1, 2)
++lst = [1, 2]
++tpl = (1, 2)
++
++for value in (nt, lst, tpl):
++    try:
++        res = q.resolve_lookup_value(value, False, False)
++        print(f"Success for {type(value).__name__}: {res}")
++    except Exception as e:
++        print(f"Error for {type(value).__name__}: {e}")
++
+diff --git a/test_resolve3.py b/test_resolve3.py
+new file mode 100644
+index 0000000000..c15e2dd66d
+--- /dev/null
++++ b/test_resolve3.py
+@@ -0,0 +1,32 @@
++from collections import namedtuple
++
++class DummyQuery:
++    def resolve_lookup_value(self, value, can_reuse, allow_joins):
++        if hasattr(value, 'resolve_expression'):
++            return value.resolve_expression(self, reuse=can_reuse, allow_joins=allow_joins)
++        elif isinstance(value, (list, tuple)):
++            # The items of the iterable may be expressions and therefore need
++            # to be resolved independently.
++            resolved_values = (
++                self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
++                for sub_value in value
++            )
++            if hasattr(value, '_make'):
++                return value._make(resolved_values)
++            return type(value)(resolved_values)
++        return value
++
++q = DummyQuery()
++NT = namedtuple('NT', ['near', 'far'])
++
++nt = NT(1, 2)
++lst = [1, 2]
++tpl = (1, 2)
++
++for value in (nt, lst, tpl):
++    try:
++        res = q.resolve_lookup_value(value, False, False)
++        print(f"Success for {type(value).__name__}: {res}")
++    except Exception as e:
++        print(f"Error for {type(value).__name__}: {e}")
++
+diff --git a/test_resolve4.py b/test_resolve4.py
+new file mode 100644
+index 0000000000..dd4c60b860
+--- /dev/null
++++ b/test_resolve4.py
+@@ -0,0 +1,40 @@
++from collections import namedtuple
++
++class DummyQuery:
++    def resolve_lookup_value(self, value, can_reuse, allow_joins):
++        if hasattr(value, 'resolve_expression'):
++            return value.resolve_expression(self, reuse=can_reuse, allow_joins=allow_joins)
++        elif isinstance(value, (list, tuple)):
++            # The items of the iterable may be expressions and therefore need
++            # to be resolved independently.
++            resolved_values = (
++                self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
++                for sub_value in value
++            )
++            if hasattr(value, '_make'):
++                return value._make(resolved_values)
++            return type(value)(resolved_values)
++        return value
++
++q = DummyQuery()
++NT = namedtuple('NT', ['near', 'far'])
++
++class CustomTuple(tuple):
++    pass
++
++class CustomList(list):
++    pass
++
++nt = NT(1, 2)
++lst = [1, 2]
++tpl = (1, 2)
++ctpl = CustomTuple((1, 2))
++clst = CustomList((1, 2))
++
++for value in (nt, lst, tpl, ctpl, clst):
++    try:
++        res = q.resolve_lookup_value(value, False, False)
++        print(f"Success for {type(value).__name__}: {res}")
++    except Exception as e:
++        print(f"Error for {type(value).__name__}: {e}")
++
+diff --git a/test_tuple.py b/test_tuple.py
+new file mode 100644
+index 0000000000..c6000b2c7d
+--- /dev/null
++++ b/test_tuple.py
+@@ -0,0 +1,21 @@
++from collections import namedtuple
++
++NT = namedtuple('NT', ['near', 'far'])
++nt = NT(1, 2)
++lst = [1, 2]
++tpl = (1, 2)
++
++for value in (nt, lst, tpl):
++    cls = type(value)
++    iterator = (x * 2 for x in value)
++    try:
++        if hasattr(value, '_make'):
++            res = cls._make(iterator)
++        elif hasattr(value, '_fields'):
++            res = cls(*iterator)
++        else:
++            res = cls(iterator)
++        print(f"Success for {cls.__name__}: {res}")
++    except Exception as e:
++        print(f"Error for {cls.__name__}: {e}")
++

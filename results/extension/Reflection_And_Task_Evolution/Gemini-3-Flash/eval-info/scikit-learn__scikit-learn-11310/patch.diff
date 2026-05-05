@@ -1,0 +1,330 @@
+diff --git a/apply_fix.py b/apply_fix.py
+new file mode 100644
+index 000000000..606f11246
+--- /dev/null
++++ b/apply_fix.py
+@@ -0,0 +1,57 @@
++import sys
++
++file_path = 'sklearn/model_selection/_search.py'
++with open(file_path, 'r') as f:
++    lines = f.readlines()
++
++# Search for the lines to replace
++start_refit_line = -1
++end_refit_line = -1
++
++for i, line in enumerate(lines):
++    if 'if self.refit:' in line and 'if self.refit or not self.multimetric_:' not in line:
++        start_refit_line = i
++        # Find the end of this if block
++        j = i + 1
++        while j < len(lines) and (lines[j].strip() == '' or lines[j].startswith('            ')):
++            j += 1
++        end_refit_line = j
++        break
++
++if start_refit_line != -1:
++    print(f"Found refit block at lines {start_refit_line+1} to {end_refit_line}")
++    
++    new_refit_block = [
++        "        if self.refit:\n",
++        "            self.best_estimator_ = clone(base_estimator).set_params(\n",
++        "                **self.best_params_)\n",
++        "            refit_start_time = time.time()\n",
++        "            if y is not None:\n",
++        "                self.best_estimator_.fit(X, y, **fit_params)\n",
++        "            else:\n",
++        "                self.best_estimator_.fit(X, **fit_params)\n",
++        "            refit_end_time = time.time()\n",
++        "            self.refit_time_ = refit_end_time - refit_start_time\n"
++    ]
++    
++    lines[start_refit_line:end_refit_line] = new_refit_block
++    
++    # Check if time is imported
++    has_time_import = False
++    for line in lines:
++        if line.strip() == 'import time':
++            has_time_import = True
++            break
++    
++    if not has_time_import:
++        # Find where to add import time
++        for i, line in enumerate(lines):
++            if line.startswith('import '):
++                lines.insert(i, 'import time\n')
++                break
++
++    with open(file_path, 'w') as f:
++        f.writelines(lines)
++    print("Fix applied successfully")
++else:
++    print("Could not find refit block")
+diff --git a/edit_file.py b/edit_file.py
+new file mode 100644
+index 000000000..af88bfa60
+--- /dev/null
++++ b/edit_file.py
+@@ -0,0 +1,30 @@
++import sys
++
++def main():
++    if len(sys.argv) < 2:
++        print("Usage: python edit_file.py <file_path> [start_line] [end_line]")
++        sys.exit(1)
++    
++    file_path = sys.argv[1]
++    
++    try:
++        with open(file_path, 'r') as f:
++            lines = f.readlines()
++    except FileNotFoundError:
++        print(f"File {file_path} not found")
++        sys.exit(1)
++        
++    if len(sys.argv) == 2:
++        for i, line in enumerate(lines):
++            print(f"{i+1}: {line}", end='')
++    elif len(sys.argv) == 4:
++        start_line = int(sys.argv[2])
++        end_line = int(sys.argv[3])
++        for i in range(max(0, start_line-1), min(len(lines), end_line)):
++            print(f"{i+1}: {lines[i]}", end='')
++    else:
++        print("Invalid number of arguments")
++        sys.exit(1)
++
++if __name__ == "__main__":
++    main()
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 000000000..f74c6daf6
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,5 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task, if you have learned any additional information about the task that should be added to the task description, or if there are any modifications you can make to the relfection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Note that the task description can be changed by modifying the task_description.txt file directly.
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want.
++
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 000000000..4ffe123c3
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,30 @@
++import sklearn.datasets
++import sklearn.model_selection
++import sklearn.ensemble
++import time
++
++X, y = sklearn.datasets.load_iris(return_X_y=True)
++
++rs = sklearn.model_selection.GridSearchCV(
++    estimator=sklearn.ensemble.RandomForestClassifier(),
++    param_grid={'n_estimators': [2, 3, 4, 5]},
++    refit=True
++)
++rs.fit(X, y)
++
++if hasattr(rs, 'refit_time_'):
++    print(f"refit_time_: {rs.refit_time_}")
++else:
++    print("refit_time_ attribute not found")
++
++# Test with refit=False
++rs_no_refit = sklearn.model_selection.GridSearchCV(
++    estimator=sklearn.ensemble.RandomForestClassifier(),
++    param_grid={'n_estimators': [2, 3, 4, 5]},
++    refit=False
++)
++rs_no_refit.fit(X, y)
++if hasattr(rs_no_refit, 'refit_time_'):
++    print(f"refit_time_ (refit=False): {rs_no_refit.refit_time_}")
++else:
++    print("refit_time_ attribute not found (refit=False)")
+diff --git a/sklearn/model_selection/_search.py b/sklearn/model_selection/_search.py
+index 99d6096af..6731aa799 100644
+--- a/sklearn/model_selection/_search.py
++++ b/sklearn/model_selection/_search.py
+@@ -16,6 +16,7 @@ from abc import ABCMeta, abstractmethod
+ from collections import Mapping, namedtuple, defaultdict, Sequence, Iterable
+ from functools import partial, reduce
+ from itertools import product
++import time
+ import operator
+ import warnings
+ 
+@@ -766,11 +767,13 @@ class BaseSearchCV(six.with_metaclass(ABCMeta, BaseEstimator,
+         if self.refit:
+             self.best_estimator_ = clone(base_estimator).set_params(
+                 **self.best_params_)
++            refit_start_time = time.time()
+             if y is not None:
+                 self.best_estimator_.fit(X, y, **fit_params)
+             else:
+                 self.best_estimator_.fit(X, **fit_params)
+-
++            refit_end_time = time.time()
++            self.refit_time_ = refit_end_time - refit_start_time
+         # Store the only scorer not as a dict for single metric evaluation
+         self.scorer_ = scorers if self.multimetric_ else scorers['score']
+ 
+@@ -1066,6 +1069,10 @@ class GridSearchCV(BaseSearchCV):
+         For multi-metric evaluation, this is present only if ``refit`` is
+         specified.
+ 
++    refit_time_ : float
++        Seconds used for refitting the best model on the whole dataset.
++
++        This is available only if ``refit`` is not False.
+     scorer_ : function or a dict
+         Scorer function used on the held out data to choose the best
+         parameters for the model.
+@@ -1377,6 +1384,10 @@ class RandomizedSearchCV(BaseSearchCV):
+         For multi-metric evaluation, this is not available if ``refit`` is
+         ``False``. See ``refit`` parameter for more information.
+ 
++    refit_time_ : float
++        Seconds used for refitting the best model on the whole dataset.
++
++        This is available only if ``refit`` is not False.
+     scorer_ : function or a dict
+         Scorer function used on the held out data to choose the best
+         parameters for the model.
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 000000000..e0ade6d02
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,23 @@
++Retrieving time to refit the estimator in BaseSearchCV
++Basically, I'm trying to figure out how much time it takes to refit the best model on the full data after doing grid/random search. What I can so far do is retrieve the time it takes to fit and score each model:
++
++import sklearn.datasets
++import sklearn.model_selection
++import sklearn.ensemble
++
++X, y = sklearn.datasets.load_iris(return_X_y=True)
++
++rs = sklearn.model_selection.GridSearchCV(
++    estimator=sklearn.ensemble.RandomForestClassifier(),
++    param_grid={'n_estimators': [2, 3, 4, 5]}
++)
++rs.fit(X, y)
++print(rs.cv_results_['mean_fit_time'])
++print(rs.cv_results_['mean_score_time'])
++
++In case I run this on a single core, I could time the whole search procedure and subtract the time it took to fit the single folds during hyperparameter optimization. Nevertheless, this isn't possible any more when setting n_jobs != 1.
++
++Thus, it would be great to have an attribute refit_time_ which is simply the time it took to refit the best model.
++
++Usecase: for [OpenML.org](https://openml.org) we want to support uploading the results of hyperparameter optimization, including the time it takes to do the hyperparameter optimization. 
++
+diff --git a/test_refit_time.py b/test_refit_time.py
+new file mode 100644
+index 000000000..62485d883
+--- /dev/null
++++ b/test_refit_time.py
+@@ -0,0 +1,39 @@
++import numpy as np
++from sklearn.datasets import load_iris
++from sklearn.ensemble import RandomForestClassifier
++from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
++
++def test_grid_search_refit_time():
++    X, y = load_iris(return_X_y=True)
++    param_grid = {'n_estimators': [2, 3]}
++    
++    # Test GridSearchCV
++    gs = GridSearchCV(RandomForestClassifier(), param_grid, refit=True)
++    gs.fit(X, y)
++    assert hasattr(gs, 'refit_time_')
++    assert isinstance(gs.refit_time_, float)
++    assert gs.refit_time_ > 0
++    print("GridSearchCV refit_time_ test passed")
++
++    # Test GridSearchCV with refit=False
++    gs_no_refit = GridSearchCV(RandomForestClassifier(), param_grid, refit=False)
++    gs_no_refit.fit(X, y)
++    assert not hasattr(gs_no_refit, 'refit_time_')
++    print("GridSearchCV no refit test passed")
++
++def test_randomized_search_refit_time():
++    X, y = load_iris(return_X_y=True)
++    param_dist = {'n_estimators': [2, 3]}
++    
++    # Test RandomizedSearchCV
++    rs = RandomizedSearchCV(RandomForestClassifier(), param_dist, n_iter=2, refit=True)
++    rs.fit(X, y)
++    assert hasattr(rs, 'refit_time_')
++    assert isinstance(rs.refit_time_, float)
++    assert rs.refit_time_ > 0
++    print("RandomizedSearchCV refit_time_ test passed")
++
++if __name__ == "__main__":
++    test_grid_search_refit_time()
++    test_randomized_search_refit_time()
++    print("All tests passed!")
+diff --git a/update_docs.py b/update_docs.py
+new file mode 100644
+index 000000000..1f0a910e8
+--- /dev/null
++++ b/update_docs.py
+@@ -0,0 +1,55 @@
++import sys
++
++file_path = 'sklearn/model_selection/_search.py'
++with open(file_path, 'r') as f:
++    lines = f.readlines()
++
++def add_attribute_doc(lines, start_search, attr_doc):
++    for i in range(start_search, len(lines)):
++        if 'Attributes' in lines[i]:
++            # Found attributes section, now find where to insert
++            j = i + 1
++            while j < len(lines) and not lines[j].startswith('    best_index_ :'):
++                j += 1
++            if j < len(lines):
++                # Found best_index_, insert before it or after its description
++                # Let's insert after best_index_'s description
++                k = j + 1
++                while k < len(lines) and (lines[k].strip() == '' or lines[k].startswith('        ')):
++                    k += 1
++                lines.insert(k, attr_doc)
++                return True
++    return False
++
++refit_time_doc = """    refit_time_ : float
++        Seconds used for refitting the best model on the whole dataset.
++
++        This is available only if ``refit`` is not False.
++"""
++
++# Update BaseSearchCV (it doesn't have an Attributes section, wait, let me check)
++# Actually, I should update GridSearchCV and RandomizedSearchCV
++
++# Update GridSearchCV
++found_grid = False
++for i, line in enumerate(lines):
++    if 'class GridSearchCV(BaseSearchCV):' in line:
++        if add_attribute_doc(lines, i, refit_time_doc):
++            print("Updated GridSearchCV docstring")
++            found_grid = True
++        break
++
++# Update RandomizedSearchCV
++found_random = False
++for i, line in enumerate(lines):
++    if 'class RandomizedSearchCV(BaseSearchCV):' in line:
++        if add_attribute_doc(lines, i, refit_time_doc):
++            print("Updated RandomizedSearchCV docstring")
++            found_random = True
++        break
++
++if found_grid or found_random:
++    with open(file_path, 'w') as f:
++        f.writelines(lines)
++else:
++    print("Could not find locations to update docs")

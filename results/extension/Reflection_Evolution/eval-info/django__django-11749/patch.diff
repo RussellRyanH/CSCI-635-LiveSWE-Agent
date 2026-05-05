@@ -1,0 +1,1684 @@
+diff --git a/TASK_DESCRIPTION_PATH b/TASK_DESCRIPTION_PATH
+new file mode 100644
+index 0000000000..386b28e6ff
+--- /dev/null
++++ b/TASK_DESCRIPTION_PATH
+@@ -0,0 +1,22 @@
++call_command fails when argument of required mutually exclusive group is passed in kwargs.
++Description
++	
++This error 
++django.core.management.base.CommandError: Error: one of the arguments --shop-id --shop is required
++is raised when I run 
++call_command('my_command', shop_id=1)
++the argument 'shop_id' is part of a required mutually exclusive group:
++shop = parser.add_mutually_exclusive_group(required=True)
++shop.add_argument('--shop-id', nargs='?', type=int, default=None, dest='shop_id')
++shop.add_argument('--shop', nargs='?', type=str, default=None, dest='shop_name')
++However, everything is fine when I call this command in this way:
++call_command('my_command, '--shop-id=1')
++In django sources I found that only those keyword arguments of call_command are passed to the parser that are defined as required:
++# Any required arguments which are passed in via '**options' must be passed
++# to parse_args().
++parse_args += [
++	'{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++	for opt in parser._actions if opt.required and opt.dest in options
++]
++but in this special case both of them individually are not required, they are actually part of a group that is required. And the code of call_command does nothing with groups defined in the parser.
++
+diff --git a/apply_patch.py b/apply_patch.py
+new file mode 100644
+index 0000000000..47f7cbf78a
+--- /dev/null
++++ b/apply_patch.py
+@@ -0,0 +1,721 @@
++import re
++
++with open('django/core/management/__init__.py', 'r') as f:
++    content = f.read()
++
++target = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if opt.required and opt.dest in options
++    ]"""
++
++new_replacement = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++# Update for recursive mutually_exclusive_required_options
++recursive_replacement = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++# Since `get_actions` recurses into sub-parsers, let's just make it yield parsers or something.
++# Wait, let's keep it simple. `parser._mutually_exclusive_groups` gets groups of the main parser. What if we do:
++better_replacement = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++# Wait, instead of recursing on _mutually_exclusive_groups, maybe we can just get them within `get_actions(parser)`? But `get_actions` yields `opt`.
++# We can just write a quick `get_mutually_exclusive_required_options(parser)` since there is no harm.
++
++final_replacement = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++recursive_final_replacement = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++# I will write `parse_args` generator properly. Let's think. We want `mutually_exclusive_required_options` to have the subparser ones too.
++really_final_replacement = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    required_actions = [
++        opt for opt in parser_actions
++        if opt.required or opt in mutually_exclusive_required_options
++    ]
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in required_actions if opt.dest in options
++    ]"""
++
++proper_recursive = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    def get_mutually_exclusive_required_options(parser):
++        options = {
++            opt
++            for group in parser._mutually_exclusive_groups
++            if group.required
++            for opt in group._group_actions
++        }
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    options.update(get_mutually_exclusive_required_options(sub_opt))
++        return options
++
++    mutually_exclusive_required_options = get_mutually_exclusive_required_options(parser)
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++recursive_without_redundancy = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++recursive_with_all = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    # Subparsers might have mutually exclusive required options too.
++    # It is cleaner to use a helper function to collect them all.
++"""
++
++clean_recursive = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++# I will write `get_actions` so it yields the required options as well, but wait, if it yields tuples it breaks other things since `parser_actions = list(get_actions(parser))` is used later.
++# Let's keep `parser_actions` list of opt.
++
++clean_recursive2 = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    for opt in parser._actions:
++        if isinstance(opt, _SubParsersAction):
++            for sub_opt in opt.choices.values():
++                mutually_exclusive_required_options.update({
++                    opt
++                    for group in sub_opt._mutually_exclusive_groups
++                    if group.required
++                    for opt in group._group_actions
++                })
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++# But subparsers could be nested multiple times? Technically yes. So a recursive function is better.
++
++final_good_replacement = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++
++    def get_mutually_exclusive_required_options(parser):
++        options = {
++            opt
++            for group in parser._mutually_exclusive_groups
++            if group.required
++            for opt in group._group_actions
++        }
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    options.update(get_mutually_exclusive_required_options(sub_opt))
++        return options
++
++    mutually_exclusive_required_options = get_mutually_exclusive_required_options(parser)
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++# I can remove the first `mutually_exclusive_required_options` since it gets overwritten by the second one.
++
++cleanest_replacement = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++# Actually, doing recursive extraction of mutually exclusive groups from subparsers in `get_actions` is simple if we just traverse parsers.
++better_traversal = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++best_clean_code = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    for opt in parser._actions:
++        if isinstance(opt, _SubParsersAction):
++            for sub_opt in opt.choices.values():
++                mutually_exclusive_required_options.update({
++                    opt
++                    for group in sub_opt._mutually_exclusive_groups
++                    if group.required
++                    for opt in group._group_actions
++                })
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++# To deal with deeply nested subparsers, let's use a queue or recurse on parsers.
++very_best_clean_code = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    def get_mutually_exclusive_required_options(parser):
++        options = {
++            opt
++            for group in parser._mutually_exclusive_groups
++            if group.required
++            for opt in group._group_actions
++        }
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    options.update(get_mutually_exclusive_required_options(sub_opt))
++        return options
++
++    mutually_exclusive_required_options = get_mutually_exclusive_required_options(parser)
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++# I will use `get_mutually_exclusive_required_options` since it properly recurses arbitrarily deeply exactly like `get_actions` does implicitly.
++target = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if opt.required and opt.dest in options
++    ]"""
++
++final_version = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    def get_mutually_exclusive_required_options(parser):
++        options = {
++            opt
++            for group in parser._mutually_exclusive_groups
++            if group.required
++            for opt in group._group_actions
++        }
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    options.update(get_mutually_exclusive_required_options(sub_opt))
++        return options
++
++    mutually_exclusive_required_options = get_mutually_exclusive_required_options(parser)
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++# Actually, I noticed that earlier I declared `mutually_exclusive_required_options` twice in `final_version` by mistake.
++real_final_version = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    def get_mutually_exclusive_required_options(parser):
++        options = {
++            opt
++            for group in parser._mutually_exclusive_groups
++            if group.required
++            for opt in group._group_actions
++        }
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    options.update(get_mutually_exclusive_required_options(sub_opt))
++        return options
++
++    mutually_exclusive_required_options = get_mutually_exclusive_required_options(parser)
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++real_final_clean_version = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    def get_mutually_exclusive_required_options(parser):
++        options = {
++            opt
++            for group in parser._mutually_exclusive_groups
++            if group.required
++            for opt in group._group_actions
++        }
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    options.update(get_mutually_exclusive_required_options(sub_opt))
++        return options
++
++    mutually_exclusive_required_options = get_mutually_exclusive_required_options(parser)
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++# I will write python script to apply the clean version where `mutually_exclusive_required_options` is only declared once!
++
++clean_final_version = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }""" # NO
++
++cleanest_final_version = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    
++    def get_mutually_exclusive_required_options(parser):
++        # Helper to get mutually exclusive required options from subparsers.
++        # Wait, if we use a helper, we don't need the local first declaration.
++        pass"""
++
++# It's cleaner to traverse the parsers and extract them in one block without writing a separate function.
++super_clean = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++# I will just write a python script to replace the target with `super_clean` but wait, my test showed `super_clean` fails for subparsers because it doesn't have the subparser options!
++# I will define `mutually_exclusive_required_options = { ... }` then loop over `parser._actions` to add the subparser ones (just 1 level deep is what django does for other things, but `get_actions` does recursive).
++# Wait, let's use `parser_actions` list to find the subparsers? No, `parser_actions` does not contain `_SubParsersAction`, it yields actions *inside* the subparsers.
++
++# So we can traverse subparsers explicitly:
++
++explicit_traverse = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    def get_mutually_exclusive_required_options(parser):
++        options = set()
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    options.update({
++                        opt
++                        for group in sub_opt._mutually_exclusive_groups
++                        if group.required
++                        for opt in group._group_actions
++                    })
++                    options.update(get_mutually_exclusive_required_options(sub_opt))
++        return options
++
++    mutually_exclusive_required_options.update(get_mutually_exclusive_required_options(parser))
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++if target in content:
++    content = content.replace(target, explicit_traverse)
++    with open('django/core/management/__init__.py', 'w') as f:
++        f.write(content)
++    print("Success")
++else:
++    print("Error")
+diff --git a/apply_patch_generator.py b/apply_patch_generator.py
+new file mode 100644
+index 0000000000..78deb01e72
+--- /dev/null
++++ b/apply_patch_generator.py
+@@ -0,0 +1,60 @@
++import re
++
++with open('django/core/management/__init__.py', 'r') as f:
++    content = f.read()
++
++target = """    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    def get_mutually_exclusive_required_options(parser):
++        options = set()
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    options.update({
++                        opt
++                        for group in sub_opt._mutually_exclusive_groups
++                        if group.required
++                        for opt in group._group_actions
++                    })
++                    options.update(get_mutually_exclusive_required_options(sub_opt))
++        return options
++
++    mutually_exclusive_required_options.update(get_mutually_exclusive_required_options(parser))
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args()."""
++
++replacement = """    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    def get_mutually_exclusive_required_options(parser):
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from (
++                        opt
++                        for group in sub_opt._mutually_exclusive_groups
++                        if group.required
++                        for opt in group._group_actions
++                    )
++                    yield from get_mutually_exclusive_required_options(sub_opt)
++
++    mutually_exclusive_required_options.update(get_mutually_exclusive_required_options(parser))
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args()."""
++
++if target in content:
++    content = content.replace(target, replacement)
++    with open('django/core/management/__init__.py', 'w') as f:
++        f.write(content)
++    print("Success")
++else:
++    print("Error")
+diff --git a/apply_patch_safe.py b/apply_patch_safe.py
+new file mode 100644
+index 0000000000..fe1ead0bf5
+--- /dev/null
++++ b/apply_patch_safe.py
+@@ -0,0 +1,58 @@
++import re
++
++with open('django/core/management/__init__.py', 'r') as f:
++    content = f.read()
++
++target = """    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    def get_mutually_exclusive_required_options(parser):
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from (
++                        opt
++                        for group in sub_opt._mutually_exclusive_groups
++                        if group.required
++                        for opt in group._group_actions
++                    )
++                    yield from get_mutually_exclusive_required_options(sub_opt)
++
++    mutually_exclusive_required_options.update(get_mutually_exclusive_required_options(parser))
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args()."""
++
++replacement = """    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    def get_mutually_exclusive_required_options(parser):
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from (
++                        group_opt
++                        for group in sub_opt._mutually_exclusive_groups
++                        if group.required
++                        for group_opt in group._group_actions
++                    )
++                    yield from get_mutually_exclusive_required_options(sub_opt)
++
++    mutually_exclusive_required_options.update(get_mutually_exclusive_required_options(parser))
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args()."""
++
++if target in content:
++    content = content.replace(target, replacement)
++    with open('django/core/management/__init__.py', 'w') as f:
++        f.write(content)
++    print("Success")
++else:
++    print("Error")
+diff --git a/django/core/management/__init__.py b/django/core/management/__init__.py
+index 5f2e64761e..b6bb0af961 100644
+--- a/django/core/management/__init__.py
++++ b/django/core/management/__init__.py
+@@ -130,11 +130,30 @@ def call_command(command_name, *args, **options):
+                 yield opt
+ 
+     parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    def get_mutually_exclusive_required_options(parser):
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from (
++                        group_opt
++                        for group in sub_opt._mutually_exclusive_groups
++                        if group.required
++                        for group_opt in group._group_actions
++                    )
++                    yield from get_mutually_exclusive_required_options(sub_opt)
++
++    mutually_exclusive_required_options.update(get_mutually_exclusive_required_options(parser))
+     # Any required arguments which are passed in via **options must be passed
+     # to parse_args().
+     parse_args += [
+         '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
+-        for opt in parser_actions if opt.required and opt.dest in options
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
+     ]
+     defaults = parser.parse_args(args=parse_args)
+     defaults = dict(defaults._get_kwargs(), **arg_options)
+diff --git a/final_patch.py b/final_patch.py
+new file mode 100644
+index 0000000000..ae3c71755d
+--- /dev/null
++++ b/final_patch.py
+@@ -0,0 +1,36 @@
++import re
++
++with open('django/core/management/__init__.py', 'r') as f:
++    content = f.read()
++
++# We need to replace `parser_actions = list(get_actions(parser))` down to `parse_args +=`
++target = """    parser_actions = list(get_actions(parser))
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if opt.required and opt.dest in options
++    ]"""
++
++new_replacement = """    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++if target in content:
++    content = content.replace(target, new_replacement)
++    with open('django/core/management/__init__.py', 'w') as f:
++        f.write(content)
++    print("Success: Updated django/core/management/__init__.py")
++else:
++    print("Error: Target code block not found in __init__.py")
++
+diff --git a/final_patch_subparsers.py b/final_patch_subparsers.py
+new file mode 100644
+index 0000000000..5b31c1d606
+--- /dev/null
++++ b/final_patch_subparsers.py
+@@ -0,0 +1,50 @@
++import re
++
++with open('django/core/management/__init__.py', 'r') as f:
++    content = f.read()
++
++target = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++new_replacement = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions}
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++# I need to match the actual file content since I patched it previously.
+diff --git a/fix_init.py b/fix_init.py
+new file mode 100644
+index 0000000000..2440fc7533
+--- /dev/null
++++ b/fix_init.py
+@@ -0,0 +1,95 @@
++with open('django/core/management/__init__.py', 'r') as f:
++    content = f.read()
++
++target = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++replacement = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++# I need to change mutually_exclusive_required_options to be recursive
++new_replacement = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    def get_mutually_exclusive_required_options(parser):
++        options = {
++            opt
++            for group in parser._mutually_exclusive_groups
++            if group.required
++            for opt in group._group_actions
++        }
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    options.update(get_mutually_exclusive_required_options(sub_opt))
++        return options
++
++    mutually_exclusive_required_options = get_mutually_exclusive_required_options(parser)
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++if target in content:
++    content = content.replace(target, new_replacement)
++    with open('django/core/management/__init__.py', 'w') as f:
++        f.write(content)
++    print("Patched with recursive")
++else:
++    print("Target not found.")
++
+diff --git a/inspect_parser.py b/inspect_parser.py
+new file mode 100644
+index 0000000000..814db5548d
+--- /dev/null
++++ b/inspect_parser.py
+@@ -0,0 +1,8 @@
++from reproduce import Command
++
++parser = Command().create_parser('', 'my_command')
++for group in parser._mutually_exclusive_groups:
++    print("Group required:", group.required)
++    for action in group._group_actions:
++        print("Action dest:", action.dest, "Action required:", action.required)
++
+diff --git a/inspect_subparsers.py b/inspect_subparsers.py
+new file mode 100644
+index 0000000000..58fd23f2dc
+--- /dev/null
++++ b/inspect_subparsers.py
+@@ -0,0 +1,9 @@
++from argparse import ArgumentParser
++parser = ArgumentParser()
++subparsers = parser.add_subparsers()
++parser_a = subparsers.add_parser('a')
++group = parser_a.add_mutually_exclusive_group(required=True)
++group.add_argument('--foo')
++
++print(parser._mutually_exclusive_groups)
++print(parser_a._mutually_exclusive_groups)
+diff --git a/patch_init.py b/patch_init.py
+new file mode 100644
+index 0000000000..6786b6c59f
+--- /dev/null
++++ b/patch_init.py
+@@ -0,0 +1,52 @@
++import re
++
++with open('django/core/management/__init__.py', 'r') as f:
++    content = f.read()
++
++replacement = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++target = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if opt.required and opt.dest in options
++    ]"""
++
++if target in content:
++    content = content.replace(target, replacement)
++    with open('django/core/management/__init__.py', 'w') as f:
++        f.write(content)
++    print("Patch successful!")
++else:
++    print("Target not found.")
+diff --git a/patch_init_recursive.py b/patch_init_recursive.py
+new file mode 100644
+index 0000000000..1459f6f4ad
+--- /dev/null
++++ b/patch_init_recursive.py
+@@ -0,0 +1,77 @@
++import re
++
++with open('django/core/management/__init__.py', 'r') as f:
++    content = f.read()
++
++replacement = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++new_replacement = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++# Let's fix new_replacement to use recursion for mutually exclusive required options
++
++new_replacement_recursive = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++# Actually, I should inspect how `parser_actions` extracts actions.
+diff --git a/refactor_init.py b/refactor_init.py
+new file mode 100644
+index 0000000000..0227d0d40e
+--- /dev/null
++++ b/refactor_init.py
+@@ -0,0 +1,269 @@
++with open('django/core/management/__init__.py', 'r') as f:
++    content = f.read()
++
++import re
++
++target = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    def get_mutually_exclusive_required_options(parser):
++        options = {
++            opt
++            for group in parser._mutually_exclusive_groups
++            if group.required
++            for opt in group._group_actions
++        }
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    options.update(get_mutually_exclusive_required_options(sub_opt))
++        return options
++
++    mutually_exclusive_required_options = get_mutually_exclusive_required_options(parser)
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++new_code = """    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++
++    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    def get_mutually_exclusive_required_options(parser):
++        options = {
++            opt
++            for group in parser._mutually_exclusive_groups
++            if group.required
++            for opt in group._group_actions
++        }
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    options.update(get_mutually_exclusive_required_options(sub_opt))
++        return options
++
++    mutually_exclusive_required_options = get_mutually_exclusive_required_options(parser)"""
++
++new_cleaned_code = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    def get_mutually_exclusive_required_options(parser):
++        options = {
++            opt
++            for group in parser._mutually_exclusive_groups
++            if group.required
++            for opt in group._group_actions
++        }
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    options.update(get_mutually_exclusive_required_options(sub_opt))
++        return options
++
++    mutually_exclusive_required_options = get_mutually_exclusive_required_options(parser)"""
++
++final_code = """    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++"""
++
++cleaned_up = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    
++    # We can do this cleanly in one loop:
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++"""
++
++replacement_v2 = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++# Let's use re to replace everything between `def get_actions(parser):` and `defaults = parser.parse_args(args=parse_args)`
++pattern = re.compile(r'    def get_actions\(parser\):.*?defaults = parser\.parse_args\(args=parse_args\)', re.DOTALL)
++
++better_code = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]
++    defaults = parser.parse_args(args=parse_args)"""
++
++# Actually, my previous fix `fix_init.py` used `get_mutually_exclusive_required_options`. But wait, does a subparser ever have required arguments that are passed in via **options? 
++# Usually **options is only applicable to the entire command. If there are sub-parsers, do their mutually exclusive groups apply? 
++# Yes, because `parser_actions = list(get_actions(parser))` gets all actions, including from subparsers.
++# Let's clean up the code.
++
++clean_replacement = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    def get_mutually_exclusive_required_options(parser):
++        options = {
++            opt
++            for group in parser._mutually_exclusive_groups
++            if group.required
++            for opt in group._group_actions
++        }
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    options.update(get_mutually_exclusive_required_options(sub_opt))
++        return options
++
++    mutually_exclusive_required_options = get_mutually_exclusive_required_options(parser)
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++new_clean_replacement = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++content = content.replace(target, new_code) # wait, what did I want?
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..ba706bf20c
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,4 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Also note, at any step, you may choose to update your reflection prompt by editing reflection_prompt.txt instead of executing a bash command. 
++
+diff --git a/reproduce.py b/reproduce.py
+new file mode 100644
+index 0000000000..a82067fff2
+--- /dev/null
++++ b/reproduce.py
+@@ -0,0 +1,52 @@
++import os
++import django
++from django.conf import settings
++from django.core.management import call_command, BaseCommand
++
++settings.configure(
++    INSTALLED_APPS=[
++        'django.contrib.auth',
++        'django.contrib.contenttypes',
++    ],
++    DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}},
++)
++django.setup()
++
++# Create a management command dynamically
++class Command(BaseCommand):
++    def add_arguments(self, parser):
++        shop = parser.add_mutually_exclusive_group(required=True)
++        shop.add_argument('--shop-id', nargs='?', type=int, default=None, dest='shop_id')
++        shop.add_argument('--shop', nargs='?', type=str, default=None, dest='shop_name')
++
++    def handle(self, *args, **options):
++        print(f"Command executed with shop_id={options.get('shop_id')} shop_name={options.get('shop_name')}")
++
++# Register the command
++from django.core.management import get_commands, load_command_class
++import django.core.management
++
++original_load_command_class = django.core.management.load_command_class
++def mock_load_command_class(app_name, name):
++    if name == 'my_command':
++        return Command()
++    return original_load_command_class(app_name, name)
++
++django.core.management.load_command_class = mock_load_command_class
++django.core.management.get_commands = lambda: {'my_command': 'auth'}
++
++try:
++    print("Calling with shop_id=1")
++    call_command('my_command', shop_id=1)
++except Exception as e:
++    import traceback
++    traceback.print_exc()
++
++print("---")
++
++try:
++    print("Calling with shop_name='test'")
++    call_command('my_command', shop_name='test')
++except Exception as e:
++    import traceback
++    traceback.print_exc()
+diff --git a/test_parse_args.py b/test_parse_args.py
+new file mode 100644
+index 0000000000..648a995c8e
+--- /dev/null
++++ b/test_parse_args.py
+@@ -0,0 +1,9 @@
++from django.core.management import call_command
++import argparse
++
++parser = argparse.ArgumentParser()
++group = parser.add_mutually_exclusive_group(required=True)
++group.add_argument('--foo')
++group.add_argument('--bar')
++
++print(parser._mutually_exclusive_groups[0]._group_actions)
+diff --git a/test_subparser_me.py b/test_subparser_me.py
+new file mode 100644
+index 0000000000..165438ede8
+--- /dev/null
++++ b/test_subparser_me.py
+@@ -0,0 +1,30 @@
++import argparse
++from django.core.management import call_command, BaseCommand
++from reproduce import mock_load_command_class
++import django.core.management
++
++class SubCommand(BaseCommand):
++    def add_arguments(self, parser):
++        subparsers = parser.add_subparsers(dest='subcommand')
++        parser_a = subparsers.add_parser('sub_a')
++        group = parser_a.add_mutually_exclusive_group(required=True)
++        group.add_argument('--foo')
++        group.add_argument('--bar')
++
++    def handle(self, *args, **options):
++        print(f"SubCommand executed with subcommand={options.get('subcommand')} foo={options.get('foo')} bar={options.get('bar')}")
++
++def mock_load_subcommand(app_name, name):
++    if name == 'my_sub_command':
++        return SubCommand()
++    return mock_load_command_class(app_name, name)
++
++django.core.management.load_command_class = mock_load_subcommand
++django.core.management.get_commands = lambda: {'my_sub_command': 'auth'}
++
++try:
++    print("Calling my_sub_command with subcommand='sub_a', foo='val'")
++    call_command('my_sub_command', 'sub_a', foo='val')
++except Exception as e:
++    import traceback
++    traceback.print_exc()
