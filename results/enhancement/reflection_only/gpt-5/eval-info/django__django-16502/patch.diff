@@ -1,0 +1,229 @@
+diff --git a/TASK_DESCRIPTION_PATH b/TASK_DESCRIPTION_PATH
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/django/core/servers/basehttp.py b/django/core/servers/basehttp.py
+index fef5532e58..fba2917496 100644
+--- a/django/core/servers/basehttp.py
++++ b/django/core/servers/basehttp.py
+@@ -148,6 +148,18 @@ class ServerHandler(simple_server.ServerHandler):
+         super().close()
+ 
+ 
++
++    def write(self, data):
++        """
++        For compliance with RFC 2616/7231, do not send a response body for
++        HTTP HEAD requests. Ensure headers are sent but skip body bytes.
++        """
++        if self.environ.get("REQUEST_METHOD") == "HEAD":
++            if not getattr(self, "headers_sent", False):
++                self.send_headers()
++            return
++        super().write(data)
++
+ class WSGIRequestHandler(simple_server.WSGIRequestHandler):
+     protocol_version = "HTTP/1.1"
+ 
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..38cfe8b431
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,30 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++
++[Assistant plan additions]
++- Immediate next steps:
++  1) Inspect django/core/servers/basehttp.py for the dev WSGI server/handler that writes response bodies.
++  2) Search for classes like WSGIRequestHandler, ServerHandler, ThreadingWSGIServer, and any Django-specific overrides.
++  3) Identify where the body is written to the client and conditionally suppress it if environ['REQUEST_METHOD'] == 'HEAD'.
++  4) Ensure headers (including Content-Length) are preserved; only body must be stripped.
++  5) Confirm behavior with tests or a minimal local server harness if available.
++
++- Verification strategy:
++  - Grep for "basehttp" and "runserver" responsibility for writing the body.
++  - If tests exist for HEAD behavior in tests/, run them to see current failure and re-run after fix.
++  - If no direct tests, create a small script to boot the dev server (WSGI app) and make HTTP HEAD request locally to verify no body is returned.
++
++- Technical hints:
++  - In wsgiref handlers, request_method may be available via environ; Django’s subclass may override write() or finish_response().
++  - Implement gating body write on HEAD at the lowest level that writes chunks to the socket to apply universally.
++  - Avoid altering response computation logic; only change the transport of the body for HEAD.
++
++- Constraints and reminders:
++  - Do not modify tests or configuration files.
++  - Keep the fix minimal and consistent with existing coding style and abstractions.
++  - Use tools/edit.py for safe edits:
++    * tools/edit.py show <file> --start N --end M
++    * tools/edit.py replace <file> --pattern P --repl R [--regex]
++    * tools/edit.py insert-before/insert-after
+diff --git a/tools/edit.py b/tools/edit.py
+new file mode 100755
+index 0000000000..f3bf30ac33
+--- /dev/null
++++ b/tools/edit.py
+@@ -0,0 +1,161 @@
++#!/usr/bin/env python3
++import sys, re, argparse, os
++
++def die(msg, code=1):
++    print(f"[edit.py] ERROR: {msg}", file=sys.stderr)
++    sys.exit(code)
++
++def info(msg):
++    print(f"[edit.py] {msg}", file=sys.stderr)
++
++def cmd_write(args):
++    data = sys.stdin.read()
++    with open(args.file, "w", encoding="utf-8") as f:
++        f.write(data)
++    info(f"wrote {len(data)} bytes to {args.file}")
++
++def cmd_append(args):
++    data = sys.stdin.read()
++    with open(args.file, "a", encoding="utf-8") as f:
++        f.write(data)
++    info(f"appended {len(data)} bytes to {args.file}")
++
++def cmd_replace(args):
++    if not os.path.exists(args.file):
++        die(f"file not found: {args.file}")
++    with open(args.file, "r", encoding="utf-8") as f:
++        txt = f.read()
++    count = args.count
++    if args.regex:
++        flags = 0
++        if args.flags:
++            for ch in args.flags.upper():
++                if ch == "I":
++                    flags |= re.IGNORECASE
++                elif ch == "M":
++                    flags |= re.MULTILINE
++                elif ch == "S":
++                    flags |= re.DOTALL
++                elif ch == "X":
++                    flags |= re.VERBOSE
++                else:
++                    die(f"unknown regex flag: {ch}")
++        try:
++            pat = re.compile(args.pattern, flags)
++        except re.error as e:
++            die(f"invalid regex: {e}")
++        max_count = 0 if count is None else max(0, int(count))
++        new_txt, n = pat.subn(args.repl, txt, count=max_count)
++    else:
++        # literal replacement
++        if count is None:
++            n = txt.count(args.pattern)
++            new_txt = txt.replace(args.pattern, args.repl)
++        else:
++            max_count = max(0, int(count))
++            prefix_splits = txt.split(args.pattern, max_count)
++            # compute n as actual occurrences replaced (<= max_count)
++            total = txt.count(args.pattern)
++            n = min(total, max_count)
++            new_txt = args.repl.join(prefix_splits)
++    if new_txt != txt:
++        with open(args.file, "w", encoding="utf-8") as f:
++            f.write(new_txt)
++    info(f"replaced {n} occurrence(s) in {args.file}")
++
++def _insert_common(args, before=False):
++    if not os.path.exists(args.file):
++        die(f"file not found: {args.file}")
++    with open(args.file, "r", encoding="utf-8") as f:
++        lines = f.readlines()
++    content = sys.stdin.read()
++    pat = args.pattern
++    found = False
++    i = 0
++    while i < len(lines):
++        line = lines[i]
++        hit = False
++        if args.regex:
++            if re.search(pat, line):
++                hit = True
++        else:
++            if pat in line:
++                hit = True
++        if hit:
++            idx = i if before else i + 1
++            lines.insert(idx, content)
++            found = True
++            if args.once:
++                break
++            i = idx + 1  # skip over inserted content
++        else:
++            i += 1
++    if not found:
++        die("pattern not found for insertion")
++    with open(args.file, "w", encoding="utf-8") as f:
++        f.writelines(lines)
++    pos = "before" if before else "after"
++    info(f"inserted content {pos} pattern in {args.file}")
++
++def cmd_insert_after(args):
++    _insert_common(args, before=False)
++
++def cmd_insert_before(args):
++    _insert_common(args, before=True)
++
++def cmd_show(args):
++    if not os.path.exists(args.file):
++        die(f"file not found: {args.file}")
++    with open(args.file, "r", encoding="utf-8") as f:
++        lines = f.readlines()
++    start = 1 if args.start is None else max(1, int(args.start))
++    end = len(lines) if args.end is None else min(len(lines), int(args.end))
++    for i in range(start-1, end):
++        sys.stdout.write(f"{i+1:6d}: {lines[i]}")
++
++def main():
++    p = argparse.ArgumentParser(description="Lightweight file edit tool")
++    sub = p.add_subparsers(dest="cmd", required=True)
++
++    pw = sub.add_parser("write", help="overwrite file with stdin")
++    pw.add_argument("file")
++    pw.set_defaults(func=cmd_write)
++
++    pa = sub.add_parser("append", help="append stdin to file")
++    pa.add_argument("file")
++    pa.set_defaults(func=cmd_append)
++
++    pr = sub.add_parser("replace", help="search/replace in file")
++    pr.add_argument("file")
++    pr.add_argument("--pattern", required=True)
++    pr.add_argument("--repl", required=True)
++    pr.add_argument("--regex", action="store_true")
++    pr.add_argument("--count", type=int, default=None, help="max replacements, default all")
++    pr.add_argument("--flags", help="regex flags: I,M,S,X")
++    pr.set_defaults(func=cmd_replace)
++
++    pia = sub.add_parser("insert-after", help="insert stdin after matching line(s)")
++    pia.add_argument("file")
++    pia.add_argument("--pattern", required=True)
++    pia.add_argument("--regex", action="store_true")
++    pia.add_argument("--once", action="store_true")
++    pia.set_defaults(func=cmd_insert_after)
++
++    pib = sub.add_parser("insert-before", help="insert stdin before matching line(s)")
++    pib.add_argument("file")
++    pib.add_argument("--pattern", required=True)
++    pib.add_argument("--regex", action="store_true")
++    pib.add_argument("--once", action="store_true")
++    pib.set_defaults(func=cmd_insert_before)
++
++    ps = sub.add_parser("show", help="show file with line numbers")
++    ps.add_argument("file")
++    ps.add_argument("--start", type=int)
++    ps.add_argument("--end", type=int)
++    ps.set_defaults(func=cmd_show)
++
++    args = p.parse_args()
++    args.func(args)
++
++if __name__ == "__main__":
++    main()

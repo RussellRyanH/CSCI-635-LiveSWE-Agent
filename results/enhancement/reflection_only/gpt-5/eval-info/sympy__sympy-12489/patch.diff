@@ -1,0 +1,450 @@
+diff --git a/TASK_DESCRIPTION_PATH b/TASK_DESCRIPTION_PATH
+new file mode 100644
+index 000000000..9029ee68b
+--- /dev/null
++++ b/TASK_DESCRIPTION_PATH
+@@ -0,0 +1,11 @@
++combinatorics.Permutation can't be subclassed properly
++I stumbled across a subclassing issue with combinatorics.Permutation:
++The object creation is done in Permutation.__new__, but internally the function _af_new is used (which itself is a reference to the static method Permutation._af_new). This method eventually creates the object calling Basic.__new__(Perm, perm) (Perm is a reference to Permutation).
++In the end, this makes subclassing Permutation impossible (besides overriding Permutation._af_new as always instances of Permutation are returned.
++
++An elegant solution would be to stick to Python's instance creation mechanisms, i.e. use classmethods where appropriate (__new__ is one) and use the mandatory reference to the class (the first argument of a classmethod) the method is called on for instance creation.
++
++I'm completely new to sympy development and encountered this issue whilst trying to subclass Permutation. Therefore I'm not aware of any side effects changing the instance creation probably has. (I monkeypatched it locally and ran the tests, all succeeded.)
++
++Maybe there is a coherent explanation why the implementation is as it is and should not be changed?
++
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 000000000..1171c2f8d
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,13 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++
++# Added workflow enhancements (Permutation subclassing task)
++- Create and use a simple edit tool early (tools/edit.py) for precise code changes.
++- Before editing, locate relevant files with ripgrep/grep (e.g., combinatorics Permutation implementation).
++- Write a minimal reproduction script to assert subclassing returns subclass instances.
++- Modify __new__/factory methods to be classmethods and use 'cls' throughout object creation paths instead of hardcoding base classes.
++- Ensure any internal helpers (_af_new etc.) accept/propagate 'cls' and call 'super().__new__(cls, ...)' or equivalent.
++- Re-run reproduction and unit tests after changes; check edge cases and immutability constraints.
++- If deviating from plan or encountering blockers, append new insights here before proceeding.
+diff --git a/sympy/combinatorics/permutations.py b/sympy/combinatorics/permutations.py
+index 4ac1c2ef3..1066d60a2 100644
+--- a/sympy/combinatorics/permutations.py
++++ b/sympy/combinatorics/permutations.py
+@@ -857,19 +857,19 @@ def __new__(cls, *args, **kwargs):
+         #g) (Permutation) = adjust size or return copy
+         ok = True
+         if not args:  # a
+-            return _af_new(list(range(size or 0)))
++            return cls._af_new(list(range(size or 0)))
+         elif len(args) > 1:  # c
+-            return _af_new(Cycle(*args).list(size))
++            return cls._af_new(Cycle(*args).list(size))
+         if len(args) == 1:
+             a = args[0]
+             if isinstance(a, Perm):  # g
+                 if size is None or size == a.size:
+-                    return a
+-                return Perm(a.array_form, size=size)
++                    return a if isinstance(a, cls) else cls(a.array_form, size=a.size)
++                return cls(a.array_form, size=size)
+             if isinstance(a, Cycle):  # f
+-                return _af_new(a.list(size))
++                return cls._af_new(a.list(size))
+             if not is_sequence(a):  # b
+-                return _af_new(list(range(a + 1)))
++                return cls._af_new(list(range(a + 1)))
+             if has_variety(is_sequence(ai) for ai in a):
+                 ok = False
+         else:
+@@ -924,8 +924,8 @@ def __new__(cls, *args, **kwargs):
+         obj._size = size
+         return obj
+ 
+-    @staticmethod
+-    def _af_new(perm):
++    @classmethod
++    def _af_new(cls, perm):
+         """A method to produce a Permutation object from a list;
+         the list is bound to the _array_form attribute, so it must
+         not be modified; this method is meant for internal use only;
+@@ -944,7 +944,7 @@ def _af_new(perm):
+         Permutation([2, 1, 3, 0])
+ 
+         """
+-        p = Basic.__new__(Perm, perm)
++        p = Basic.__new__(cls, perm)
+         p._array_form = perm
+         p._size = len(perm)
+         return p
+@@ -1159,7 +1159,7 @@ def __add__(self, other):
+ 
+         """
+         rank = (self.rank() + other) % self.cardinality
+-        rv = Perm.unrank_lex(self.size, rank)
++        rv = self.__class__.unrank_lex(self.size, rank)
+         rv._rank = rank
+         return rv
+ 
+@@ -1219,14 +1219,14 @@ def rmul(*args):
+             rv = args[i]*rv
+         return rv
+ 
+-    @staticmethod
+-    def rmul_with_af(*args):
++    @classmethod
++    def rmul_with_af(cls, *args):
+         """
+         same as rmul, but the elements of args are Permutation objects
+         which have _array_form
+         """
+         a = [x._array_form for x in args]
+-        rv = _af_new(_af_rmuln(*a))
++        rv = cls._af_new(_af_rmuln(*a))
+         return rv
+ 
+     def mul_inv(self, other):
+@@ -1235,11 +1235,11 @@ def mul_inv(self, other):
+         """
+         a = _af_invert(self._array_form)
+         b = other._array_form
+-        return _af_new(_af_rmul(a, b))
++        return self._af_new(_af_rmul(a, b))
+ 
+     def __rmul__(self, other):
+         """This is needed to coerse other to Permutation in rmul."""
+-        return Perm(other)*self
++        return self.__class__(other)*self
+ 
+     def __mul__(self, other):
+         """
+@@ -1300,7 +1300,7 @@ def __mul__(self, other):
+         else:
+             b.extend(list(range(len(b), len(a))))
+             perm = [b[i] for i in a] + b[len(a):]
+-        return _af_new(perm)
++        return self._af_new(perm)
+ 
+     def commutes_with(self, other):
+         """
+@@ -1337,11 +1337,11 @@ def __pow__(self, n):
+         >>> p**4
+         Permutation([0, 1, 2, 3])
+         """
+-        if type(n) == Perm:
++        if type(n) == self.__class__:
+             raise NotImplementedError(
+                 'p**p is not defined; do you mean p^p (conjugate)?')
+         n = int(n)
+-        return _af_new(_af_pow(self.array_form, n))
++        return self._af_new(_af_pow(self.array_form, n))
+ 
+     def __rxor__(self, i):
+         """Return self(i) when ``i`` is an int.
+@@ -1436,7 +1436,7 @@ def __xor__(self, h):
+         p = self._array_form
+         for i in range(self.size):
+             a[h[i]] = h[p[i]]
+-        return _af_new(a)
++        return self._af_new(a)
+ 
+     def transpositions(self):
+         """
+@@ -1519,7 +1519,7 @@ def __invert__(self):
+         >>> p*~p == ~p*p == Permutation([0, 1, 2, 3])
+         True
+         """
+-        return _af_new(_af_invert(self._array_form))
++        return self._af_new(_af_invert(self._array_form))
+ 
+     def __iter__(self):
+         """Yield elements from array form.
+@@ -1629,7 +1629,7 @@ def next_lex(self):
+                 perm[j], perm[i] = perm[i], perm[j]
+                 i += 1
+                 j -= 1
+-        return _af_new(perm)
++        return self._af_new(perm)
+ 
+     @classmethod
+     def unrank_nonlex(self, n, r):
+@@ -1661,7 +1661,7 @@ def _unrank1(n, r, a):
+         n = int(n)
+         r = r % ifac(n)
+         _unrank1(n, r, id_perm)
+-        return _af_new(id_perm)
++        return self._af_new(id_perm)
+ 
+     def rank_nonlex(self, inv_perm=None):
+         """
+@@ -1724,7 +1724,7 @@ def next_nonlex(self):
+         r = self.rank_nonlex()
+         if r == ifac(self.size) - 1:
+             return None
+-        return Perm.unrank_nonlex(self.size, r + 1)
++        return self.__class__.unrank_nonlex(self.size, r + 1)
+ 
+     def rank(self):
+         """
+@@ -2125,7 +2125,7 @@ def commutator(self, x):
+         invb = [None]*n
+         for i in range(n):
+             invb[b[i]] = i
+-        return _af_new([a[b[inva[i]]] for i in invb])
++        return self._af_new([a[b[inva[i]]] for i in invb])
+ 
+     def signature(self):
+         """
+@@ -2423,7 +2423,7 @@ def unrank_trotterjohnson(self, size, rank):
+                     perm[i] = perm[i - 1]
+                 perm[k] = j - 1
+             r2 = r1
+-        return _af_new(perm)
++        return self._af_new(perm)
+ 
+     def next_trotterjohnson(self):
+         """
+@@ -2477,7 +2477,7 @@ def next_trotterjohnson(self):
+                     done = True
+         if m == 0:
+             return None
+-        return _af_new(pi)
++        return self._af_new(pi)
+ 
+     def get_precedence_matrix(self):
+         """
+@@ -2707,7 +2707,7 @@ def josephus(self, m, n, s=1):
+                 Q.append(Q.popleft())
+             perm.append(Q.popleft())
+         perm.extend(list(Q))
+-        return Perm(perm)
++        return self.__class__(perm)
+ 
+     @classmethod
+     def from_inversion_vector(self, inversion):
+@@ -2734,7 +2734,7 @@ def from_inversion_vector(self, inversion):
+         except IndexError:
+             raise ValueError("The inversion vector is not valid.")
+         perm.extend(N)
+-        return _af_new(perm)
++        return self._af_new(perm)
+ 
+     @classmethod
+     def random(self, n):
+@@ -2753,7 +2753,7 @@ def random(self, n):
+         """
+         perm_array = list(range(n))
+         random.shuffle(perm_array)
+-        return _af_new(perm_array)
++        return self._af_new(perm_array)
+ 
+     @classmethod
+     def unrank_lex(self, size, rank):
+@@ -2787,7 +2787,7 @@ def unrank_lex(self, size, rank):
+                 if perm_array[j] > d - 1:
+                     perm_array[j] += 1
+             psize = new_psize
+-        return _af_new(perm_array)
++        return self._af_new(perm_array)
+ 
+     # global flag to control how permutations are printed
+     # when True, Permutation([0, 2, 1, 3]) -> Cycle(1, 2)
+@@ -2828,4 +2828,4 @@ def _merge(arr, temp, left, mid, right):
+     return inv_count
+ 
+ Perm = Permutation
+-_af_new = Perm._af_new
++_af_new = Permutation._af_new  # module-level alias for backward compatibility
+diff --git a/tools/edit.py b/tools/edit.py
+new file mode 100755
+index 000000000..c4e86a3e0
+--- /dev/null
++++ b/tools/edit.py
+@@ -0,0 +1,180 @@
++#!/usr/bin/env python3
++import argparse
++import re
++import sys
++from pathlib import Path
++
++def read_file(path):
++    try:
++        return Path(path).read_text(encoding='utf-8')
++    except FileNotFoundError:
++        sys.stderr.write(f"[edit.py] ERROR: File not found: {path}\n")
++        sys.exit(2)
++
++def write_file(path, content):
++    Path(path).write_text(content, encoding='utf-8')
++
++def literal_replace(text, old, new, count=None):
++    if count is None or count < 0:
++        return text.replace(old, new)
++    return text.replace(old, new, count)
++
++def regex_replace(text, pattern, repl, flags=0, count=0):
++    try:
++        return re.sub(pattern, repl, text, count=count if count else 0, flags=flags)
++    except re.error as e:
++        sys.stderr.write(f"[edit.py] ERROR: Invalid regex '{pattern}': {e}\n")
++        sys.exit(3)
++
++def insert_before(text, pattern, to_insert, regex=False, flags=0):
++    if regex:
++        m = re.search(pattern, text, flags)
++        if not m:
++            return None
++        idx = m.start()
++        return text[:idx] + to_insert + text[idx:]
++    else:
++        idx = text.find(pattern)
++        if idx == -1:
++            return None
++        return text[:idx] + to_insert + text[idx:]
++
++def insert_after(text, pattern, to_insert, regex=False, flags=0):
++    if regex:
++        m = re.search(pattern, text, flags)
++        if not m:
++            return None
++        idx = m.end()
++        return text[:idx] + to_insert + text[idx:]
++    else:
++        idx = text.find(pattern)
++        if idx == -1:
++            return None
++        idx += len(pattern)
++        return text[:idx] + to_insert + text[idx:]
++
++def main():
++    p = argparse.ArgumentParser(description="Simple file editor utility")
++    p.add_argument("filepath", help="Path to file to edit")
++    p.add_argument("--replace", nargs=2, action="append", metavar=("OLD", "NEW"),
++                   help="Literal string replacement (can be repeated)")
++    p.add_argument("--replace-count", type=int, default=None,
++                   help="Max replacements for literal --replace operations (applies to each)")
++    p.add_argument("--regex", nargs=2, action="append", metavar=("PATTERN", "REPL"),
++                   help="Regex replacement (can be repeated)")
++    p.add_argument("--regex-flags", default="", help="Regex flags: combine letters from I,M,S,U,X")
++    p.add_argument("--regex-count", type=int, default=0, help="Max replacements per regex operation (0 means unlimited)")
++    p.add_argument("--insert-before", nargs=2, action="append", metavar=("PATTERN", "TEXT"),
++                   help="Insert TEXT before first PATTERN occurrence (literal)")
++    p.add_argument("--insert-after", nargs=2, action="append", metavar=("PATTERN", "TEXT"),
++                   help="Insert TEXT after first PATTERN occurrence (literal)")
++    p.add_argument("--insert-before-re", nargs=2, action="append", metavar=("PATTERN", "TEXT"),
++                   help="Insert TEXT before first regex PATTERN occurrence")
++    p.add_argument("--insert-after-re", nargs=2, action="append", metavar=("PATTERN", "TEXT"),
++                   help="Insert TEXT after first regex PATTERN occurrence")
++    p.add_argument("--assert-contains", action="append", default=[],
++                   help="Assert the file contains this literal substring (can be repeated)")
++    p.add_argument("--assert-not-contains", action="append", default=[],
++                   help="Assert the file does NOT contain this literal substring (can be repeated)")
++    p.add_argument("--dry-run", action="store_true", help="Do not write changes, only report")
++    p.add_argument("--quiet", action="store_true", help="Suppress non-error output")
++    args = p.parse_args()
++
++    flags = 0
++    for ch in args.regex_flags.upper():
++        if ch == 'I': flags |= re.IGNORECASE
++        elif ch == 'M': flags |= re.MULTILINE
++        elif ch == 'S': flags |= re.DOTALL
++        elif ch == 'U': flags |= re.UNICODE
++        elif ch == 'X': flags |= re.VERBOSE
++        elif ch.strip() == '': pass
++        else:
++            sys.stderr.write(f"[edit.py] ERROR: Unknown regex flag '{ch}'\n")
++            sys.exit(4)
++
++    original = read_file(args.filepath)
++    text = original
++
++    for sub in args.assert_contains:
++        if sub not in text:
++            sys.stderr.write(f"[edit.py] ASSERT FAIL: '{sub}' not found in {args.filepath}\n")
++            sys.exit(5)
++    for sub in args.assert_not_contains:
++        if sub in text:
++            sys.stderr.write(f"[edit.py] ASSERT FAIL: '{sub}' unexpectedly found in {args.filepath}\n")
++            sys.exit(6)
++
++    if args.replace:
++        for old, new in args.replace:
++            before = text
++            text = literal_replace(text, old, new, args.replace_count)
++            if not args.quiet:
++                changed = "changed" if text != before else "no-op"
++                sys.stdout.write(f"[edit.py] replace literal: {changed}\n")
++
++    if args.regex:
++        for pattern, repl in args.regex:
++            before = text
++            text = regex_replace(text, pattern, repl, flags=flags, count=args.regex_count)
++            if not args.quiet:
++                changed = "changed" if text != before else "no-op"
++                sys.stdout.write(f"[edit.py] regex replace: {changed}\n")
++
++    if args.insert_before:
++        for pat, ins in args.insert_before:
++            before = text
++            res = insert_before(text, pat, ins, regex=False)
++            if res is None:
++                sys.stderr.write(f"[edit.py] WARN: insert-before pattern not found (literal): {pat}\n")
++            else:
++                text = res
++            if not args.quiet:
++                changed = "changed" if res is not None and text != before else "no-op"
++                sys.stdout.write(f"[edit.py] insert-before literal: {changed}\n")
++
++    if args.insert_after:
++        for pat, ins in args.insert_after:
++            before = text
++            res = insert_after(text, pat, ins, regex=False)
++            if res is None:
++                sys.stderr.write(f"[edit.py] WARN: insert-after pattern not found (literal): {pat}\n")
++            else:
++                text = res
++            if not args.quiet:
++                changed = "changed" if res is not None and text != before else "no-op"
++                sys.stdout.write(f"[edit.py] insert-after literal: {changed}\n")
++
++    if args.insert_before_re:
++        for pat, ins in args.insert_before_re:
++            before = text
++            res = insert_before(text, pat, ins, regex=True, flags=flags)
++            if res is None:
++                sys.stderr.write(f"[edit.py] WARN: insert-before pattern not found (regex): {pat}\n")
++            else:
++                text = res
++            if not args.quiet:
++                changed = "changed" if res is not None and text != before else "no-op"
++                sys.stdout.write(f"[edit.py] insert-before regex: {changed}\n")
++
++    if args.insert_after_re:
++        for pat, ins in args.insert_after_re:
++            before = text
++            res = insert_after(text, pat, ins, regex=True, flags=flags)
++            if res is None:
++                sys.stderr.write(f"[edit.py] WARN: insert-after pattern not found (regex): {pat}\n")
++            else:
++                text = res
++            if not args.quiet:
++                changed = "changed" if res is not None and text != before else "no-op"
++                sys.stdout.write(f"[edit.py] insert-after regex: {changed}\n")
++
++    if text != original and not args.dry_run:
++        write_file(args.filepath, text)
++        if not args.quiet:
++            sys.stdout.write(f"[edit.py] Wrote changes to {args.filepath}\n")
++    else:
++        if not args.quiet:
++            sys.stdout.write(f"[edit.py] No changes written (dry-run or no-op)\n")
++
++if __name__ == "__main__":
++    main()

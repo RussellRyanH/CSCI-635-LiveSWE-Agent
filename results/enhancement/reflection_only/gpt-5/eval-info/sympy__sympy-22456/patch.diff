@@ -1,0 +1,233 @@
+diff --git a/TASK_DESCRIPTION_PATH b/TASK_DESCRIPTION_PATH
+new file mode 100644
+index 0000000000..96a41f535a
+--- /dev/null
++++ b/TASK_DESCRIPTION_PATH
+@@ -0,0 +1,5 @@
++Argument invariance of codegen.ast String
++Currently, the codegen.ast String class does not support argument invariance like:
++expr.func(*expr.args) == expr, but instead uses the invariance expr.func(**expr.kwargs()) == expr.
++The former should hold for any Basic subclass, which String is.
++
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..b27f676963
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,17 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++
++- New Tool: tools/edit_tool.py
++  - Use replace_regex/insert_after_regex/add_import_if_missing to perform safe, reviewable edits to source files.
++  - Prefer this tool over ad-hoc sed for complex patterns to avoid quoting pitfalls.
++
++- Task-specific reminders:
++  - The PR requires argument invariance for codegen.ast.String so that expr.func(*expr.args) == expr holds, consistent with Basic subclasses.
++  - Locate where String is defined (likely sympy/codegen/ast.py) and inspect how args are constructed or overridden.
++  - Ensure String stores its payload in positional args (e.g., a single arg) so expr.args reconstructs properly; avoid relying solely on kwargs().
++  - Create a minimal reproduction: s = String("x"); assert s.func(*s.args) == s.
++  - After changes, run a quick import and smoke tests (import sympy; construct a few nodes) to ensure no regressions.
++  - Only modify non-test source files.
++  - Work incrementally: edit -> reproduce -> verify -> repeat.
+diff --git a/sympy/codegen/ast.py b/sympy/codegen/ast.py
+index a02714b174..37a10a9f96 100644
+--- a/sympy/codegen/ast.py
++++ b/sympy/codegen/ast.py
+@@ -1,3 +1,4 @@
++from sympy.core.symbol import Str
+ """
+ Types used to represent a full function/module as an Abstract Syntax Tree.
+ 
+@@ -904,6 +905,23 @@ def _construct_text(cls, text):
+             raise TypeError("Argument text is not a string type.")
+         return text
+ 
++    def __new__(cls, text):
++        # Preserve pass-through of existing instance
++        if isinstance(text, cls):
++            return text
++        # Accept SymPy Str or Python str and normalize to Python str for .text
++        if isinstance(text, Str):
++            s = text.name
++        else:
++            if not isinstance(text, str):
++                raise TypeError("Argument text is not a string type.")
++            s = text
++        # Construct Basic with Str(text) so that expr.func(*expr.args) == expr
++        obj = CodegenAST.__new__(cls, Str(s))
++        # Set attribute expected by existing API
++        obj.text = s
++        return obj
++
+     def _sympystr(self, printer, *args, **kwargs):
+         return self.text
+ 
+diff --git a/tools/edit_tool.py b/tools/edit_tool.py
+new file mode 100755
+index 0000000000..8d8afb0ee3
+--- /dev/null
++++ b/tools/edit_tool.py
+@@ -0,0 +1,154 @@
++#!/usr/bin/env python3
++import argparse
++import re
++import sys
++from pathlib import Path
++
++def read_text(path):
++    p = Path(path)
++    if not p.exists():
++        sys.exit(f"[edit_tool] ERROR: File does not exist: {path}")
++    try:
++        return p.read_text(encoding='utf-8')
++    except Exception as e:
++        sys.exit(f"[edit_tool] ERROR: Failed to read {path}: {e}")
++
++def write_text(path, text):
++    p = Path(path)
++    try:
++        p.write_text(text, encoding='utf-8')
++    except Exception as e:
++        sys.exit(f"[edit_tool] ERROR: Failed to write {path}: {e}")
++
++def replace_regex(path, pattern, replacement, count=0, flags=0):
++    text = read_text(path)
++    try:
++        new_text, n = re.subn(pattern, replacement, text, count=count, flags=flags)
++    except re.error as e:
++        sys.exit(f"[edit_tool] ERROR: Invalid regex '{pattern}': {e}")
++    if n == 0:
++        print(f"[edit_tool] WARNING: No matches for pattern in {path}")
++    else:
++        print(f"[edit_tool] INFO: Replaced {n} occurrence(s) in {path}")
++    if new_text != text:
++        write_text(path, new_text)
++
++def insert_after_regex(path, pattern, to_insert, flags=0, first_only=False):
++    text = read_text(path)
++    try:
++        regex = re.compile(pattern, flags)
++    except re.error as e:
++        sys.exit(f"[edit_tool] ERROR: Invalid regex '{pattern}': {e}")
++    matches = list(regex.finditer(text))
++    if not matches:
++        print(f"[edit_tool] WARNING: No matches for insertion in {path}")
++        return
++    out = []
++    last_end = 0
++    count = 0
++    for m in matches:
++        out.append(text[last_end:m.end()])
++        out.append(to_insert)
++        last_end = m.end()
++        count += 1
++        if first_only:
++            break
++    out.append(text[last_end:])
++    new_text = ''.join(out)
++    if new_text != text:
++        write_text(path, new_text)
++        print(f"[edit_tool] INFO: Inserted after {count} match(es) in {path}")
++
++def assert_present_regex(path, pattern, flags=0):
++    text = read_text(path)
++    try:
++        if re.search(pattern, text, flags):
++            print(f"[edit_tool] INFO: Pattern present in {path}")
++            return 0
++        else:
++            print(f"[edit_tool] INFO: Pattern NOT present in {path}")
++            return 1
++    except re.error as e:
++        sys.exit(f"[edit_tool] ERROR: Invalid regex '{pattern}': {e}")
++
++def add_import_if_missing(path, import_line):
++    text = read_text(path)
++    if import_line.strip() in text:
++        print(f"[edit_tool] INFO: Import already present in {path}")
++        return
++    lines = text.splitlines(keepends=True)
++    insert_idx = 0
++    for i, line in enumerate(lines):
++        s = line.strip()
++        if s.startswith('import ') or s.startswith('from '):
++            insert_idx = i + 1
++        elif s and not s.startswith('#'):
++            break
++    lines.insert(insert_idx, import_line.rstrip() + "\n")
++    write_text(path, ''.join(lines))
++    print(f"[edit_tool] INFO: Added import to {path}")
++
++def main():
++    ap = argparse.ArgumentParser(description="Simple file edit tool for regex replacements and insertions.")
++    sub = ap.add_subparsers(dest="cmd", required=True)
++
++    rp = sub.add_parser("replace_regex", help="Regex replace in file")
++    rp.add_argument("path")
++    rp.add_argument("pattern")
++    rp.add_argument("replacement")
++    rp.add_argument("--count", type=int, default=0)
++    rp.add_argument("--flags", default="")
++
++    ia = sub.add_parser("insert_after_regex", help="Insert text after regex match(es)")
++    ia.add_argument("path")
++    ia.add_argument("pattern")
++    ia.add_argument("--flags", default="")
++    ia.add_argument("--first-only", action="store_true")
++    ia.add_argument("--from-stdin", action="store_true", help="Read insertion text from stdin")
++
++    apm = sub.add_parser("assert_present_regex", help="Assert that regex is present in file")
++    apm.add_argument("path")
++    apm.add_argument("pattern")
++    apm.add_argument("--flags", default="")
++
++    aim = sub.add_parser("add_import_if_missing", help="Add an import line if missing")
++    aim.add_argument("path")
++    aim.add_argument("import_line")
++
++    args = ap.parse_args()
++
++    flag_map = {
++        "I": re.IGNORECASE,
++        "M": re.MULTILINE,
++        "S": re.DOTALL,
++        "X": re.VERBOSE,
++        "A": re.ASCII,
++        "U": re.UNICODE,
++    }
++    flags = 0
++    if hasattr(args, "flags") and args.flags:
++        for ch in args.flags:
++            if ch in flag_map:
++                flags |= flag_map[ch]
++            else:
++                sys.exit(f"[edit_tool] ERROR: Unknown flag '{ch}'")
++
++    if args.cmd == "replace_regex":
++        replace_regex(args.path, args.pattern, args.replacement, count=args.count, flags=flags)
++    elif args.cmd == "insert_after_regex":
++        if args.from_stdin:
++            to_insert = sys.stdin.read()
++        else:
++            print("[edit_tool] ERROR: Provide insertion text via --from-stdin and stdin", file=sys.stderr)
++            sys.exit(2)
++        insert_after_regex(args.path, args.pattern, to_insert, flags=flags, first_only=args.first_only)
++    elif args.cmd == "assert_present_regex":
++        rc = assert_present_regex(args.path, args.pattern, flags=flags)
++        sys.exit(rc)
++    elif args.cmd == "add_import_if_missing":
++        add_import_if_missing(args.path, args.import_line)
++    else:
++        sys.exit("[edit_tool] ERROR: Unknown command")
++
++if __name__ == "__main__":
++    main()
+Type repr: IntBaseType(String('integer'))
+Tuple: (alpha, beta)
+el0 repr: String('alpha') args: (alpha,) recon eq: True
+el1 repr: String('beta') args: (beta,) recon eq: True
+Direct Str: String('direct') args: (direct,) recon eq: True
+OK

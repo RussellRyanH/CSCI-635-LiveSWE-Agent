@@ -1,0 +1,205 @@
+diff --git a/TASK_DESCRIPTION_PATH b/TASK_DESCRIPTION_PATH
+new file mode 100644
+index 0000000000..ca050bd198
+--- /dev/null
++++ b/TASK_DESCRIPTION_PATH
+@@ -0,0 +1,9 @@
++bug with HNF removing rows
++I expect
++np.flip (hermite_normal_form (Matrix (np.flip (np.array ([[5, 8, 12], [0, 0, 1]]))).T).T))
++to give
++[[5,  8, 0], [0,  0, 1]]
++but instead I get
++[[5,  8, 0]]
++It seems to be falsely identifying my matrix as rank-deficient and removing the row when I try to achieve a row-style HNF using flips and transposes.
++
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..d730ef8cc2
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,13 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++
++- Additions for current task:
++  - Locate and compare hermite_normal_form implementations in sympy/matrices/normalforms.py and sympy/polys/matrices/normalforms.py.
++  - Reproduce the reported issue: row dropped after applying flips/transposes to achieve row-style HNF; ensure reproduction with a minimal SymPy example.
++  - Examine rank checking logic (check_rank) and any code that may remove rows; ensure shape preservation for valid inputs.
++  - Check interactions with permutations (flip/transpose) so that rank detection is not order-sensitive and does not drop nonzero rows.
++  - Ensure matrices and polys implementations remain consistent and robust with regard to row retention.
++  - After implementing a fix, verify by running a small reproduction script and applicable tests.
++  - Consider creating lightweight tools (edit_inplace.py, run_py_snippet.py) to make precise edits and quick experiments, but avoid complex command chaining when creating them.
+diff --git a/sympy/matrices/normalforms.py b/sympy/matrices/normalforms.py
+index 7bce95d230..411475bca1 100644
+--- a/sympy/matrices/normalforms.py
++++ b/sympy/matrices/normalforms.py
+@@ -124,4 +124,54 @@ def hermite_normal_form(A, *, D=None, check_rank=False):
+     # Accept any of Python int, SymPy Integer, and ZZ itself:
+     if D is not None and not ZZ.of_type(D):
+         D = ZZ(int(D))
+-    return _hnf(A._rep, D=D, check_rank=check_rank).to_Matrix()
++    # Primary computation using DomainMatrix HNF (column-style).
++    H1_dm = _hnf(A._rep, D=D, check_rank=check_rank)
++    H1 = H1_dm.to_Matrix()
++    # Fallback: if result seems rank-deficient relative to A.rank() and
++    # there are no zero rows, try transposed orientation and prefer the result
++    # with more pivot columns.
++    try:
++        rA = A.rank()
++    except Exception:
++        rA = None
++    if rA is not None:
++        r1 = H1.shape[1]
++        # Detect any all-zero rows to preserve historical behavior for such cases.
++        try:
++            rows_ll = A.tolist()
++            has_zero_row = any(all(e == 0 for e in row) for row in rows_ll)
++        except Exception:
++            has_zero_row = False
++        
++        if not has_zero_row and r1 < rA:
++            # Try transposed orientation
++            At = A.transpose()
++            H2 = _hnf(At._rep, D=D, check_rank=check_rank).to_Matrix().transpose()
++            best = None
++            best_cols = H1.shape[1]
++            if H2.shape[0] == A.shape[0] and H2.shape[1] > best_cols:
++                best = H2
++                best_cols = H2.shape[1]
++            # Additionally, try cyclic row rotations to bring informative rows
++            # into the bottom window considered by the DomainMatrix HNF algorithm.
++            m, n = A.shape
++            cols = list(range(n))
++            for t in range(1, min(m, n)):
++                rows_idx = list(range(t, m)) + list(range(0, t))
++                Ap = A.extract(rows_idx, cols)
++                Hp = _hnf(Ap._rep, D=D, check_rank=check_rank).to_Matrix()
++                # Un-permute rows back to original order
++                inv = [0]*m
++                for new_pos, old_pos in enumerate(rows_idx):
++                    inv[old_pos] = new_pos
++                Hunp = Hp.extract(inv, list(range(Hp.shape[1])))
++                if Hunp.shape[0] == A.shape[0] and Hunp.shape[1] > best_cols:
++                    best = Hunp
++                    best_cols = Hunp.shape[1]
++                    # Early exit if we've matched the expected rank
++                    if rA is not None and best_cols >= rA:
++                        break
++            if best is not None:
++                return best
++
++    return H1
+diff --git a/sympy/polys/matrices/normalforms.py b/sympy/polys/matrices/normalforms.py
+index 30f5534b08..54e5b9223f 100644
+--- a/sympy/polys/matrices/normalforms.py
++++ b/sympy/polys/matrices/normalforms.py
+@@ -238,7 +238,7 @@ def _hermite_normal_form(A):
+             k += 1
+         # If the pivot entry is nonzero, then we want to reduce all entries to its
+         # right in the sense of the division algorithm, i.e. make them all remainders
+-        # w.r.t. the pivot as divisor.
++        # w.r.t. the pivot as divisor. Count this as a successful pivot placement.
+         else:
+             for j in range(k + 1, n):
+                 q = A[i][j] // b
+diff --git a/tools/edit_inplace.py b/tools/edit_inplace.py
+new file mode 100644
+index 0000000000..2d9865ad08
+--- /dev/null
++++ b/tools/edit_inplace.py
+@@ -0,0 +1,92 @@
++#!/usr/bin/env python3
++import argparse
++import re
++import sys
++from pathlib import Path
++
++def replace_literal(text, old, new):
++    return text.replace(old, new), (old in text)
++
++def replace_regex(text, pattern, repl, count=0, flags=0):
++    new_text, n = re.subn(pattern, repl, text, count=count, flags=flags)
++    return new_text, n > 0
++
++def insert_before(text, pattern, newtext, flags=0):
++    m = re.search(pattern, text, flags)
++    if not m:
++        return text, False
++    start = m.start()
++    return text[:start] + newtext + text[start:], True
++
++def insert_after(text, pattern, newtext, flags=0):
++    m = re.search(pattern, text, flags)
++    if not m:
++        return text, False
++    end = m.end()
++    return text[:end] + newtext + text[end:], True
++
++def append_if_missing(text, substring, append_text):
++    if substring in text:
++        return text, False
++    return text + append_text, True
++
++def main():
++    p = argparse.ArgumentParser(description="Edit a file in-place with simple operations.")
++    p.add_argument("file", help="Path to file to edit")
++    g = p.add_mutually_exclusive_group(required=True)
++    g.add_argument("--replace-literal", nargs=2, metavar=("OLD","NEW"))
++    g.add_argument("--replace-regex", nargs=2, metavar=("PATTERN","REPL"))
++    g.add_argument("--insert-before", nargs=2, metavar=("PATTERN","NEWTEXT"))
++    g.add_argument("--insert-after", nargs=2, metavar=("PATTERN","NEWTEXT"))
++    g.add_argument("--append-if-missing", nargs=2, metavar=("SUBSTRING","APPENDTEXT"))
++    p.add_argument("--count", type=int, default=0, help="Max replacements for regex (0 means all)")
++    p.add_argument("--flags", default="", help="Regex flags, e.g., IGNORECASE|MULTILINE")
++    args = p.parse_args()
++
++    path = Path(args.file)
++    if not path.exists():
++        print(f"[edit_inplace] ERROR: File not found: {path}", file=sys.stderr)
++        sys.exit(2)
++
++    text = path.read_text(encoding="utf-8")
++
++    flags = 0
++    if args.flags:
++        for name in args.flags.split("|"):
++            name = name.strip()
++            if not name:
++                continue
++            if not hasattr(re, name):
++                print(f"[edit_inplace] ERROR: Invalid regex flag: {name}", file=sys.stderr)
++                sys.exit(2)
++            flags |= getattr(re, name)
++
++    changed = False
++    new_text = text
++
++    if args.replace_literal:
++        old, new = args.replace_literal
++        new_text, changed = replace_literal(new_text, old, new)
++    elif args.replace_regex:
++        pat, repl = args.replace_regex
++        new_text, changed = replace_regex(new_text, pat, repl, count=args.count, flags=flags)
++    elif args.insert_before:
++        pat, newt = args.insert_before
++        new_text, changed = insert_before(new_text, pat, newt, flags=flags)
++    elif args.insert_after:
++        pat, newt = args.insert_after
++        new_text, changed = insert_after(new_text, pat, newt, flags=flags)
++    elif args.append_if_missing:
++        sub, app = args.append_if_missing
++        new_text, changed = append_if_missing(new_text, sub, app)
++
++    if not changed:
++        print("[edit_inplace] No changes made.")
++        sys.exit(0)
++
++    path.write_text(new_text, encoding="utf-8")
++    print(f"[edit_inplace] Updated: {path}")
++    sys.exit(0)
++
++if __name__ == "__main__":
++    main()

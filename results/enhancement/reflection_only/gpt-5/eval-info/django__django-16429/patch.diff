@@ -1,0 +1,159 @@
+diff --git a/TASK_DESCRIPTION_PATH b/TASK_DESCRIPTION_PATH
+new file mode 100644
+index 0000000000..c4ce64aa47
+--- /dev/null
++++ b/TASK_DESCRIPTION_PATH
+@@ -0,0 +1,20 @@
++timesince() raises TypeError with USE_TZ=True and >1 month interval.
++Description
++	 
++		(last modified by Sage Abdullah)
++	 
++As of 8d67e16493c903adc9d049141028bc0fff43f8c8, calling timesince() with a datetime object that's one month (or more) in the past and the USE_TZ setting is set to True results in the following crash:
++TypeError: can't subtract offset-naive and offset-aware datetimes
++Test:
++...
++class TimesinceTests(TestCase):
++	...
++	@requires_tz_support
++	@override_settings(USE_TZ=True)
++	def test_long_interval_with_tz(self):
++		now = timezone.now()
++		d = now - datetime.timedelta(days=31)
++		self.assertEqual(timesince(d), 1xa0month)
++I believe this is because the pivot instantiated here: ​https://github.com/django/django/blob/d2310f6473593d28c14b63a72253408b568e100a/django/utils/timesince.py#L93-L100 does not take into account the datetime object's tzinfo. Adding 0, d.tzinfo arguments to the datetime.datetime call seems to fix this.
++Happy to send a PR.
++
+diff --git a/django/utils/timesince.py b/django/utils/timesince.py
+index 701c49bab9..f052116849 100644
+--- a/django/utils/timesince.py
++++ b/django/utils/timesince.py
+@@ -97,6 +97,8 @@ def timesince(d, now=None, reversed=False, time_strings=None, depth=2):
+             d.hour,
+             d.minute,
+             d.second,
++            d.microsecond,
++            d.tzinfo,
+         )
+     else:
+         pivot = d
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..6bdc6ef489
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,9 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++- Create and use tools/edit_file.py for safe file edits (regex/literal/insert) to avoid manual mistakes.
++- Reproduce the timesince USE_TZ bug with a quick script before changes; confirm it raises TypeError for >1 month intervals.
++- When fixing, ensure tzinfo is preserved when constructing any pivot/anchor datetimes; never subtract naive from aware.
++- Prefer using the input datetime's tzinfo or timezone utilities instead of naive constructors.
++- After implementing fix, rerun the reproduction script and relevant subset of tests to validate behavior.
+diff --git a/tools/edit_file.py b/tools/edit_file.py
+new file mode 100755
+index 0000000000..135f459cf9
+--- /dev/null
++++ b/tools/edit_file.py
+@@ -0,0 +1,99 @@
++#!/usr/bin/env python3
++import argparse
++import re
++import sys
++from pathlib import Path
++
++def read_text(path):
++    return Path(path).read_text(encoding="utf-8")
++
++def write_text(path, content):
++    Path(path).write_text(content, encoding="utf-8")
++
++def cmd_replace(args):
++    content = read_text(args.file)
++    new_content = content.replace(args.old, args.new)
++    if content == new_content:
++        print(f"[INFO] No occurrences replaced in {args.file}")
++    else:
++        write_text(args.file, new_content)
++        print(f"[OK] Replaced all literal occurrences in {args.file}")
++
++def cmd_replace_regex(args):
++    flags = 0
++    if args.ignore_case:
++        flags |= re.IGNORECASE
++    if args.multiline:
++        flags |= re.MULTILINE
++    pattern = re.compile(args.pattern, flags)
++    content = read_text(args.file)
++    new_content, n = pattern.subn(args.replacement, content)
++    if n == 0:
++        print(f"[INFO] No regex matches in {args.file}")
++    else:
++        write_text(args.file, new_content)
++        print(f"[OK] Applied {n} regex replacement(s) in {args.file}")
++
++def cmd_insert_after(args):
++    flags = re.MULTILINE if args.multiline else 0
++    pattern = re.compile(args.pattern, flags)
++    content = read_text(args.file)
++    lines = content.splitlines(keepends=True)
++    joined = "".join(lines)
++    m = pattern.search(joined)
++    if not m:
++        print(f"[INFO] Pattern not found in {args.file}")
++        return
++    insert_pos = m.end()
++    new_content = joined[:insert_pos] + args.text + joined[insert_pos:]
++    write_text(args.file, new_content)
++    print(f"[OK] Inserted text after first match in {args.file}")
++
++def cmd_assert_contains(args):
++    content = read_text(args.file)
++    if args.regex:
++        if not re.search(args.pattern, content, re.MULTILINE):
++            print(f"[ERROR] Regex not found in {args.file}")
++            sys.exit(2)
++    else:
++        if args.pattern not in content:
++            print(f"[ERROR] Text not found in {args.file}")
++            sys.exit(2)
++    print(f"[OK] Assertion passed for {args.file}")
++
++def main():
++    parser = argparse.ArgumentParser(description="Simple file edit tool for scripted modifications.")
++    sub = parser.add_subparsers(dest="cmd", required=True)
++
++    p1 = sub.add_parser("replace", help="Literal find/replace")
++    p1.add_argument("file")
++    p1.add_argument("old")
++    p1.add_argument("new")
++    p1.set_defaults(func=cmd_replace)
++
++    p2 = sub.add_parser("replace_regex", help="Regex find/replace")
++    p2.add_argument("file")
++    p2.add_argument("pattern")
++    p2.add_argument("replacement")
++    p2.add_argument("--ignore-case", action="store_true")
++    p2.add_argument("--multiline", action="store_true")
++    p2.set_defaults(func=cmd_replace_regex)
++
++    p3 = sub.add_parser("insert_after", help="Insert text after first regex match")
++    p3.add_argument("file")
++    p3.add_argument("pattern")
++    p3.add_argument("text")
++    p3.add_argument("--multiline", action="store_true")
++    p3.set_defaults(func=cmd_insert_after)
++
++    p4 = sub.add_parser("assert_contains", help="Assert file contains text/regex")
++    p4.add_argument("file")
++    p4.add_argument("pattern")
++    p4.add_argument("--regex", action="store_true")
++    p4.set_defaults(func=cmd_assert_contains)
++
++    args = parser.parse_args()
++    args.func(args)
++
++if __name__ == "__main__":
++    main()

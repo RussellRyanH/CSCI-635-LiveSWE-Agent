@@ -1,0 +1,196 @@
+diff --git a/TASK_DESCRIPTION_PATH b/TASK_DESCRIPTION_PATH
+new file mode 100644
+index 0000000000..8cb1d21f30
+--- /dev/null
++++ b/TASK_DESCRIPTION_PATH
+@@ -0,0 +1,8 @@
++Set disabled prop on ReadOnlyPasswordHashField
++Description
++	
++Currently the django.contrib.auth.forms.UserChangeForm defines a clean_password method that returns the initial password value to prevent (accidental) changes to the password value. It is also documented that custom forms for the User model need to define this method: ​https://docs.djangoproject.com/en/3.1/topics/auth/customizing/#a-full-example
++A while ago the forms.Field base class gained the ​disabled argument to:
++[disable] a form field using the disabled HTML attribute so that it won’t be editable by users. Even if a user tampers with the field’s value submitted to the server, it will be ignored in favor of the value from the form’s initial data.
++It seems to me that this property could be set to True be default on the ReadOnlyPasswordHashField used to display the password hash. This way the clean_password is no longer necessary and the potential pitfall when using the ReadOnlyPasswordHashField without implementing clean_password is removed.
++
+diff --git a/django/contrib/auth/forms.py b/django/contrib/auth/forms.py
+index b9eb33329f..9a6614a809 100644
+--- a/django/contrib/auth/forms.py
++++ b/django/contrib/auth/forms.py
+@@ -56,6 +56,7 @@ class ReadOnlyPasswordHashField(forms.Field):
+ 
+     def __init__(self, *args, **kwargs):
+         kwargs.setdefault("required", False)
++        kwargs.setdefault("disabled", True)
+         super().__init__(*args, **kwargs)
+ 
+     def bound_data(self, data, initial):
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..65d716e0f6
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,15 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++- Add a lightweight Python file-editing tool to apply precise patches (search/replace, insertion near patterns) to avoid manual, error-prone edits.
++- When changing forms.Field behavior (like setting disabled=True by default on ReadOnlyPasswordHashField), ensure __init__ maintains backward compatibility and allows overriding disabled explicitly.
++- After implementing changes, search for any dependent code (e.g., clean_password in UserChangeForm) to confirm no additional updates are required.
++- Prefer targeted tests or quick scripts to validate that disabled fields ignore submitted data in favor of initial.
++- Add and use a lightweight Python file-editing tool (search/replace, insert near regex) to apply precise patches safely.
++- When setting disabled=True by default on ReadOnlyPasswordHashField, preserve backward compatibility: allow explicit overrides via kwargs, and avoid breaking existing form behavior.
++- After implementing the change, search for UserChangeForm.clean_password and any other usage of ReadOnlyPasswordHashField to confirm no additional updates are required.
++- Validate behavior with a quick script: disabled fields ignore posted values and keep initial data.
++- Ensure custom tools are compatible with Python 3.6 (e.g., argparse subparsers cannot use required=True; handle missing subcommand manually).
++- Ensure custom tools are compatible with Python 3.6 (argparse subparsers: avoid required=True; manually validate).
++- When running Django code in standalone scripts, configure settings (INSTALLED_APPS, DATABASES, SECRET_KEY) and call django.setup() before importing apps.
+diff --git a/tools/edit_file.py b/tools/edit_file.py
+new file mode 100755
+index 0000000000..b94e842008
+--- /dev/null
++++ b/tools/edit_file.py
+@@ -0,0 +1,143 @@
++#!/usr/bin/env python3
++import argparse
++import re
++import sys
++from pathlib import Path
++
++def load_text(path):
++    p = Path(path)
++    if not p.exists():
++        sys.stderr.write(f"[edit_file] ERROR: File does not exist: {path}\n")
++        sys.exit(2)
++    return p.read_text(encoding="utf-8"), p
++
++def save_text(p, text):
++    p.write_text(text, encoding="utf-8")
++
++def op_replace(args):
++    text, p = load_text(args.file)
++    flags = re.MULTILINE | re.DOTALL if args.dotall else re.MULTILINE
++    try:
++        pattern = re.compile(args.pattern, flags)
++    except re.error as e:
++        sys.stderr.write(f"[edit_file] ERROR: Invalid regex pattern: {e}\n")
++        sys.exit(2)
++    new_text, n = pattern.subn(args.repl, text, count=0 if args.count is None else args.count)
++    if n == 0 and args.fail_if_no_match:
++        sys.stderr.write("[edit_file] No matches found; no changes made.\n")
++        sys.exit(3)
++    if new_text != text:
++        save_text(p, new_text)
++    print(f"[edit_file] replace: {n} substitution(s).")
++    return 0
++
++def _find_line_index(lines, pattern, dotall=False):
++    flags = re.DOTALL if dotall else 0
++    rx = re.compile(pattern, flags)
++    for i, line in enumerate(lines):
++        if rx.search(line):
++            return i
++    return -1
++
++def op_insert_after(args):
++    text, p = load_text(args.file)
++    lines = text.splitlines(keepends=True)
++    idx = _find_line_index(lines, args.pattern, args.dotall)
++    if idx == -1:
++        if args.fail_if_no_match:
++            sys.stderr.write("[edit_file] insert_after: anchor pattern not found.\n")
++            sys.exit(3)
++        print("[edit_file] insert_after: anchor pattern not found; no changes.")
++        return 0
++    insertion = args.text
++    if not insertion.endswith("\n"):
++        insertion += "\n"
++    lines.insert(idx + 1, insertion)
++    save_text(p, "".join(lines))
++    print(f"[edit_file] insert_after: inserted after line {idx+1}.")
++    return 0
++
++def op_insert_before(args):
++    text, p = load_text(args.file)
++    lines = text.splitlines(keepends=True)
++    idx = _find_line_index(lines, args.pattern, args.dotall)
++    if idx == -1:
++        if args.fail_if_no_match:
++            sys.stderr.write("[edit_file] insert_before: anchor pattern not found.\n")
++            sys.exit(3)
++        print("[edit_file] insert_before: anchor pattern not found; no changes.")
++        return 0
++    insertion = args.text
++    if not insertion.endswith("\n"):
++        insertion += "\n"
++    lines.insert(idx, insertion)
++    save_text(p, "".join(lines))
++    print(f"[edit_file] insert_before: inserted before line {idx+1}.")
++    return 0
++
++def op_ensure_line(args):
++    text, p = load_text(args.file)
++    lines = text.splitlines(keepends=True)
++    target = args.line
++    has_nl = target.endswith("\n")
++    if not has_nl:
++        target += "\n"
++    if any(l.rstrip("\n") == target.rstrip("\n") for l in lines):
++        print("[edit_file] ensure_line: line already present; no changes.")
++        return 0
++    inserted = False
++    if args.after:
++        idx = _find_line_index(lines, args.after, args.dotall)
++        if idx != -1:
++            lines.insert(idx + 1, target)
++            inserted = True
++    elif args.before:
++        idx = _find_line_index(lines, args.before, args.dotall)
++        if idx != -1:
++            lines.insert(idx, target)
++            inserted = True
++    if not inserted:
++        lines.append(target)
++    save_text(p, "".join(lines))
++    print("[edit_file] ensure_line: inserted.")
++    return 0
++
++def main():
++    parser = argparse.ArgumentParser(description="Lightweight file editing tool for precise patches.")
++    parser.add_argument("--file", required=True, help="Path to file to edit")
++    parser.add_argument("--dotall", action="store_true", help="Enable DOTALL for regex searches")
++    parser.add_argument("--fail-if-no-match", action="store_true", help="Fail if pattern not found for insert/replace")
++    sub = parser.add_subparsers(dest="op")
++
++    p_rep = sub.add_parser("replace", help="Regex replace")
++    p_rep.add_argument("--pattern", required=True)
++    p_rep.add_argument("--repl", required=True)
++    p_rep.add_argument("--count", type=int, default=None, help="Max replacements (default: all)")
++    p_rep.set_defaults(func=op_replace)
++
++    p_ia = sub.add_parser("insert_after", help="Insert text after first line matching pattern")
++    p_ia.add_argument("--pattern", required=True)
++    p_ia.add_argument("--text", required=True)
++    p_ia.set_defaults(func=op_insert_after)
++
++    p_ib = sub.add_parser("insert_before", help="Insert text before first line matching pattern")
++    p_ib.add_argument("--pattern", required=True)
++    p_ib.add_argument("--text", required=True)
++    p_ib.set_defaults(func=op_insert_before)
++
++    p_el = sub.add_parser("ensure_line", help="Ensure exact line exists, optionally positioning relative to regex")
++    p_el.add_argument("--line", required=True)
++    p_el.add_argument("--after", default=None, help="Regex anchor to insert after")
++    p_el.add_argument("--before", default=None, help="Regex anchor to insert before")
++    p_el.set_defaults(func=op_ensure_line)
++
++    args = parser.parse_args()
++    if getattr(args, "op", None) is None:
++        parser.print_usage(sys.stderr)
++        sys.stderr.write("[edit_file] ERROR: missing operation subcommand.\n")
++        sys.exit(2)
++    rc = args.func(args)
++    sys.exit(rc)
++
++if __name__ == "__main__":
++    main()
