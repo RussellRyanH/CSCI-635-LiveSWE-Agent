@@ -1,0 +1,77 @@
+diff --git a/REFLECTION_PROMPT_PATH b/REFLECTION_PROMPT_PATH
+new file mode 100644
+index 0000000000..8b13789179
+--- /dev/null
++++ b/REFLECTION_PROMPT_PATH
+@@ -0,0 +1 @@
++
+diff --git a/django/db/migrations/operations/fields.py b/django/db/migrations/operations/fields.py
+index cd3aab43ad..2ae618f276 100644
+--- a/django/db/migrations/operations/fields.py
++++ b/django/db/migrations/operations/fields.py
+@@ -264,6 +264,9 @@ class AlterField(FieldOperation):
+                     field=self.field,
+                 ),
+             ]
++        # Consecutive AlterField on the same field can be reduced to the latter one.
++        elif isinstance(operation, AlterField) and self.is_same_field_operation(operation):
++            return [operation]
+         return super().reduce(operation, app_label)
+ 
+ 
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 0000000000..d5b98158fb
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,50 @@
++Migration optimizer does not reduce multiple AlterField
++Description
++	
++Let's consider the following operations: 
++operations = [
++	migrations.AddField(
++		model_name=book,
++		name=title,
++		field=models.CharField(max_length=256, null=True),
++	),
++	migrations.AlterField(
++		model_name=book,
++		name=title,
++		field=models.CharField(max_length=128, null=True),
++	),
++	migrations.AlterField(
++		model_name=book,
++		name=title,
++		field=models.CharField(max_length=128, null=True, help_text=help),
++	),
++	migrations.AlterField(
++		model_name=book,
++		name=title,
++		field=models.CharField(max_length=128, null=True, help_text=help, default=None),
++	),
++]
++If I run the optimizer, I get only the AddField, as we could expect. However, if the AddField model is separated from the AlterField (e.g. because of a non-elidable migration, or inside a non-squashed migration), none of the AlterField are reduced:
++optimizer.optimize(operations[1:], books) 
++[<AlterField model_name='book', name='title', field=<django.db.models.fields.CharField>>,
++ <AlterField model_name='book', name='title', field=<django.db.models.fields.CharField>>,
++ <AlterField model_name='book', name='title', field=<django.db.models.fields.CharField>>]
++Indeed, the AlterField.reduce does not consider the the case where operation is also an AlterField. 
++Is this behaviour intended? If so, could it be documented? 
++Otherwise, would it make sense to add something like
++		if isinstance(operation, AlterField) and self.is_same_field_operation(
++			operation
++		):
++			return [operation]
++
++Added insights:
++- AlterField implementation located at: django/db/migrations/operations/fields.py (around line ~198).
++- Multiple reduce() implementations for field operations are present in this file (e.g., lines flagged by grep).
++- Observed behavior: optimizer does not currently reduce multiple consecutive AlterField operations when AddField is in a different migration.
++- Planned fix: Update AlterField.reduce to handle the case where the following operation is also an AlterField on the same field (self.is_same_field_operation(operation)), returning [operation] so that earlier AlterField ops are dropped in favor of the latest.
++
++Observed results after fix:
++- Ran MigrationOptimizer on provided operations.
++  - optimize(full list) -> ['AddField']
++  - optimize(operations[1:]) -> ['AlterField']
++  - After fix, consecutive AlterField operations on the same field are reduced to a single AlterField (the last one).
