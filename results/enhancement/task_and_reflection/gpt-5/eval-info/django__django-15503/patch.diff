@@ -1,0 +1,129 @@
+diff --git a/django/db/models/fields/json.py b/django/db/models/fields/json.py
+index fdca700c9d..090a8b4a22 100644
+--- a/django/db/models/fields/json.py
++++ b/django/db/models/fields/json.py
+@@ -126,16 +126,20 @@ class JSONField(CheckFieldDefaultMixin, Field):
+         )
+ 
+ 
+-def compile_json_path(key_transforms, include_root=True):
++def compile_json_path(key_transforms, include_root=True, force_string_keys=False):
+     path = ["$"] if include_root else []
+     for key_transform in key_transforms:
+-        try:
+-            num = int(key_transform)
+-        except ValueError:  # non-integer
++        if not force_string_keys:
++            try:
++                num = int(key_transform)
++            except ValueError:  # non-integer
++                path.append(".")
++                path.append(json.dumps(key_transform))
++            else:
++                path.append("[%s]" % num)
++        else:
+             path.append(".")
+             path.append(json.dumps(key_transform))
+-        else:
+-            path.append("[%s]" % num)
+     return "".join(path)
+ 
+ 
+@@ -191,13 +195,18 @@ class HasKeyLookup(PostgresOperatorLookup):
+         for key in rhs:
+             if isinstance(key, KeyTransform):
+                 *_, rhs_key_transforms = key.preprocess_lhs(compiler, connection)
++                _force_string = False
+             else:
+                 rhs_key_transforms = [key]
++                # Force string member access only for top-level has_key lookups
++                # (i.e., when LHS is not a KeyTransform). This preserves array index
++                # semantics for KeyTransform-derived contexts like key__isnull, etc.
++                _force_string = not isinstance(self.lhs, KeyTransform)
+             rhs_params.append(
+                 "%s%s"
+                 % (
+                     lhs_json_path,
+-                    compile_json_path(rhs_key_transforms, include_root=False),
++                    compile_json_path(rhs_key_transforms, include_root=False, force_string_keys=_force_string),
+                 )
+             )
+         # Add condition for each key.
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..71b6a2c86c
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,10 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task, if you have learned any additional information about the task that should be added to the task description, or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Note that the task description can be changed by modifying the task_description.txt file directly. Anytime you execute commands that provide insight into the issue you are solving, you MUST add these insights to the task description before proceeding!
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++
++
++Reminder:
++- When learning details from code inspection, immediately append concise notes to task_description.txt.
++- Prefer surgical changes with optional flags to avoid regressions.
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 0000000000..c21d05c6d2
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,56 @@
++has_key, has_keys, and has_any_keys JSONField() lookups don't handle numeric keys on SQLite, MySQL, and Oracle.
++Description
++	 
++		(last modified by TheTerrasque)
++	 
++Problem
++When using models.​JSONField() ​has_key lookup with numerical keys on SQLite database it fails to find the keys.
++Versions:
++Django: 4.0.3
++Python: 3.9.6 (tags/v3.9.6:db3ff76, Jun 28 2021, 15:26:21) [MSC v.1929 64 bit (AMD64)] on win32
++sqlite3.version: '2.6.0'
++sqlite3.sqlite_version: '3.35.5'
++Example:
++Database
++DATABASES = {
++	'default': {
++		'ENGINE': 'django.db.backends.sqlite3',
++		'NAME': 'db.sqlite3',
++	}
++}
++Model
++class JsonFieldHasKeyTest(models.Model):
++	data = models.JSONField()
++Test
++from django.test import TestCase
++from .models import JsonFieldHasKeyTest
++class JsonFieldHasKeyTestCase(TestCase):
++	def setUp(self) -> None:
++		test = JsonFieldHasKeyTest(data={'foo': 'bar'})
++		test2 = JsonFieldHasKeyTest(data={'1111': 'bar'})
++		test.save()
++		test2.save()
++	def test_json_field_has_key(self):
++		c1 = JsonFieldHasKeyTest.objects.filter(data__has_key='foo').count()
++		c2 = JsonFieldHasKeyTest.objects.filter(data__has_key='1111').count()
++		self.assertEqual(c1, 1, Should have found 1 entry with key foo)
++		self.assertEqual(c2, 1, Should have found 1 entry with key 1111)
++Result
++FAIL: test_json_field_has_key (markers.tests.JsonFieldHasKeyTestCase)
++----------------------------------------------------------------------
++Traceback (most recent call last):
++ File H:FilesProjectsElectacoWebserviceelecservemarkerstests.py, line 16, in test_json_field_has_key	 
++	self.assertEqual(c2, 1, Should have found 1 entry with key 1111)
++AssertionError: 0 != 1 : Should have found 1 entry with key '1111'
++Additional info
++This has been tested on SQLite and Postgresql backend, it works on postgresql but fails on sqlite.
++
++
++
++Additional Insights (from code review):
++- JSONField has_key/has_keys/has_any_keys use compile_json_path() to build JSON paths.
++- compile_json_path() currently treats numeric-like keys as array indices via [num].
++- For RHS of HasKey lookups on SQLite/MySQL/Oracle, numeric-like keys must be treated as object keys (."1111").
++- Fix approach: add a flag to compile_json_path() to force string member access for RHS in HasKeyLookup.
++
++- Update: Only force string keys for literal RHS in HasKeyLookup; keep numeric indices for KeyTransform/F-expressions.

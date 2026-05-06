@@ -1,0 +1,202 @@
+diff --git a/django/contrib/admin/options.py b/django/contrib/admin/options.py
+index 64be087bf1..6d4f2865ab 100644
+--- a/django/contrib/admin/options.py
++++ b/django/contrib/admin/options.py
+@@ -269,7 +269,7 @@ class BaseModelAdmin(metaclass=forms.MediaDefiningClass):
+                         "class": get_ul_class(self.radio_fields[db_field.name]),
+                     }
+                 )
+-                kwargs["empty_label"] = _("None") if db_field.blank else None
++                kwargs["empty_label"] = (kwargs.get("empty_label") or _("None")) if db_field.blank else None
+ 
+         if "queryset" not in kwargs:
+             queryset = self.get_field_queryset(db, db_field, request)
+diff --git a/myapp/__init__.py b/myapp/__init__.py
+new file mode 100644
+index 0000000000..0c3b2c385c
+--- /dev/null
++++ b/myapp/__init__.py
+@@ -0,0 +1 @@
++default_app_config = "myapp.apps.MyAppConfig"
+diff --git a/myapp/apps.py b/myapp/apps.py
+new file mode 100644
+index 0000000000..5585559aae
+--- /dev/null
++++ b/myapp/apps.py
+@@ -0,0 +1,6 @@
++import os
++from django.apps import AppConfig
++
++class MyAppConfig(AppConfig):
++    name = "myapp"
++    path = os.path.dirname(__file__)
+diff --git a/myapp/models.py b/myapp/models.py
+new file mode 100644
+index 0000000000..f2ff2265df
+--- /dev/null
++++ b/myapp/models.py
+@@ -0,0 +1,7 @@
++from django.db import models
++
++class Parent(models.Model):
++    name = models.CharField(max_length=50)
++
++class Child(models.Model):
++    parent = models.ForeignKey(Parent, on_delete=models.CASCADE, blank=True, null=True)
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..1d7568a94f
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,11 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task, if you have learned any additional information about the task that should be added to the task description, or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Note that the task description can be changed by modifying the task_description.txt file directly. Anytime you execute commands that provide insight into the issue you are solving, you MUST add these insights to the task description before proceeding!
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++
++Next step reminder: Ensure the replacement keeps behavior when no custom empty_label is provided (fallback to _('None') if db_field.blank, else None). Verify by grepping and viewing context.
++
++Reminder: Ensure helper scripts add the project root to sys.path when executed from subdirectories (e.g., tools/), so local apps like 'myapp' are importable.
++
++Reminder: Verification succeeded. If adjusting related logic in the future, ensure radio_fields path preserves a provided empty_label and defaults to _('None') only when not supplied.
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 0000000000..c532c0e6e1
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,23 @@
++ModelAdmin with defined radio_fields override empty_label
++Description
++	
++ModelAdmin drops my empty_label and set default_empty_label. For example:
++class MyModelAdmin(ModelAdmin):
++	radio_fields = 'myfield',
++	def formfield_for_foreignkey(self, db_field, *args, **kwargs):
++		if db_field.name == 'myfield':
++			kwargs['empty_label'] = I WANT TO SET MY OWN EMPTY LABEL
++		return super().formfield_for_foreignkey(db_field, *args, **kwargs)
++You get never the I WANT TO SET MY OWN EMPTY LABEL
++How to fix it:
++In django\contrib\admin\options.py, row 234:
++kwargs['empty_label'] = _('None') if db_field.blank else None
++Should be changed on:
++kwargs['empty_label'] = (kwargs.get('empty_label') or _('None')) if db_field.blank else None
++
++
++Insight: In django/contrib/admin/options.py at line ~272, found assignment 'kwargs["empty_label"] = _("None") if db_field.blank else None' which overwrites a user-provided empty_label when radio_fields are used. The fix will change it to use an existing kwargs['empty_label'] if provided.
++
++Insight: When running the repro script from tools/, Python couldn't import 'myapp' because the project root wasn't on sys.path. The script was updated to insert the repo root into sys.path before Django setup.
++
++Verification: Ran tools/repro_admin_empty_label.py. Results: Widget: AdminRadioSelect; Empty label preserved as 'I WANT TO SET MY OWN EMPTY LABEL'; Default empty label when not provided is 'None'. This confirms kwargs['empty_label'] now respects a user-provided value with radio_fields and falls back to _('None') when blank.
+diff --git a/tools/edit_file.py b/tools/edit_file.py
+new file mode 100644
+index 0000000000..0a7581d367
+--- /dev/null
++++ b/tools/edit_file.py
+@@ -0,0 +1,60 @@
++#!/usr/bin/env python3
++import argparse, re, sys, shutil, os
++
++def replace_literal(path, search, replace, count=0):
++    with open(path, 'r', encoding='utf-8') as f:
++        data = f.read()
++    occurrences = data.count(search)
++    if occurrences == 0:
++        print(f"[edit_file] No occurrences found for literal search in {path}", file=sys.stderr)
++        return 1
++    new_data = data.replace(search, replace, count if count > 0 else occurrences)
++    backup = path + ".bak"
++    shutil.copy2(path, backup)
++    with open(path, 'w', encoding='utf-8') as f:
++        f.write(new_data)
++    print(f"[edit_file] Replaced {min(count, occurrences) if count>0 else occurrences} occurrence(s) in {path}. Backup at {backup}.")
++    return 0
++
++def replace_regex(path, pattern, replace, count=0, flags=0):
++    with open(path, 'r', encoding='utf-8') as f:
++        data = f.read()
++    compiled = re.compile(pattern, flags)
++    occurrences = len(list(compiled.finditer(data)))
++    if occurrences == 0:
++        print(f"[edit_file] No occurrences found for regex in {path}", file=sys.stderr)
++        return 1
++    new_data, n = compiled.subn(replace, data, count=count if count>0 else 0)
++    backup = path + ".bak"
++    shutil.copy2(path, backup)
++    with open(path, 'w', encoding='utf-8') as f:
++        f.write(new_data)
++    print(f"[edit_file] Replaced {n} occurrence(s) in {path} using regex. Backup at {backup}.")
++    return 0
++
++def main():
++    ap = argparse.ArgumentParser(description="Safe file edit tool")
++    sub = ap.add_subparsers(dest="cmd", required=True)
++    rl = sub.add_parser("replace_literal")
++    rl.add_argument("--file", required=True)
++    rl.add_argument("--search", required=True)
++    rl.add_argument("--replace", required=True)
++    rl.add_argument("--count", type=int, default=0)
++    rr = sub.add_parser("replace_regex")
++    rr.add_argument("--file", required=True)
++    rr.add_argument("--pattern", required=True)
++    rr.add_argument("--replace", required=True)
++    rr.add_argument("--count", type=int, default=0)
++    rr.add_argument("--ignorecase", action="store_true")
++    args = ap.parse_args()
++    if args.cmd == "replace_literal":
++        sys.exit(replace_literal(args.file, args.search, args.replace, args.count))
++    elif args.cmd == "replace_regex":
++        flags = re.IGNORECASE if args.ignorecase else 0
++        sys.exit(replace_regex(args.file, args.pattern, args.replace, args.count, flags))
++    else:
++        print("Unknown command", file=sys.stderr)
++        sys.exit(2)
++
++if __name__ == "__main__":
++    main()
+diff --git a/tools/repro_admin_empty_label.py b/tools/repro_admin_empty_label.py
+new file mode 100644
+index 0000000000..2a46443898
+--- /dev/null
++++ b/tools/repro_admin_empty_label.py
+@@ -0,0 +1,39 @@
++import os, sys
++sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
++from django.conf import settings
++
++if not settings.configured:
++    settings.configure(
++        SECRET_KEY="test",
++        INSTALLED_APPS=[
++            "django.contrib.admin",
++            "django.contrib.auth",
++            "django.contrib.contenttypes",
++            "myapp",
++        ],
++        DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
++        MIDDLEWARE=[],
++        ROOT_URLCONF=__name__,
++        USE_TZ=True,
++    )
++
++import django
++django.setup()
++
++from django.contrib import admin
++from django.contrib.admin import AdminSite
++from myapp.models import Child
++
++class ChildAdmin(admin.ModelAdmin):
++    radio_fields = {"parent": admin.VERTICAL}
++
++admin_site = AdminSite(name="test")
++ma = ChildAdmin(Child, admin_site)
++db_field = Child._meta.get_field("parent")
++
++field = ma.formfield_for_foreignkey(db_field, request=None, empty_label="I WANT TO SET MY OWN EMPTY LABEL")
++print("Widget:", type(field.widget).__name__)
++print("Empty label:", repr(field.empty_label))
++
++field_default = ma.formfield_for_foreignkey(db_field, request=None)
++print("Default empty label:", repr(field_default.empty_label))

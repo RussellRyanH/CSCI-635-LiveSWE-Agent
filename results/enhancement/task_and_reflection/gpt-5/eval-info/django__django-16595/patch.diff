@@ -1,0 +1,134 @@
+diff --git a/django/db/migrations/operations/fields.py b/django/db/migrations/operations/fields.py
+index cd3aab43ad..fdd4f664d7 100644
+--- a/django/db/migrations/operations/fields.py
++++ b/django/db/migrations/operations/fields.py
+@@ -246,11 +246,19 @@ class AlterField(FieldOperation):
+     def migration_name_fragment(self):
+         return "alter_%s_%s" % (self.model_name_lower, self.name_lower)
+ 
++    
++
+     def reduce(self, operation, app_label):
+         if isinstance(operation, RemoveField) and self.is_same_field_operation(
+             operation
+         ):
+             return [operation]
++        elif isinstance(operation, AlterField) and self.is_same_field_operation(
++            operation
++        ):
++            # Coalesce consecutive AlterField operations on the same field.
++            # The later AlterField fully specifies the desired end state.
++            return [operation]
+         elif (
+             isinstance(operation, RenameField)
+             and self.is_same_field_operation(operation)
+@@ -266,7 +274,6 @@ class AlterField(FieldOperation):
+             ]
+         return super().reduce(operation, app_label)
+ 
+-
+ class RenameField(FieldOperation):
+     """Rename a field on the model. Might affect db_column too."""
+ 
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..f710484539
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,13 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task, if you have learned any additional information about the task that should be added to the task description, or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Note that the task description can be changed by modifying the task_description.txt file directly. Anytime you execute commands that provide insight into the issue you are solving, you MUST add these insights to the task description before proceeding!
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++
++Plan updates:
++- Validate the new reduction with a minimal reproduction script using MigrationOptimizer.
++- Consider edge cases (preserve_default, db_column) are already handled similarly to existing logic.
++- Optionally run focused migration optimizer tests if available.
++
++Workflow update:
++- Execute tests: python tests/runtests.py --verbosity=1 --parallel=1 migrations
+diff --git a/repro_optimize_alterfield.py b/repro_optimize_alterfield.py
+new file mode 100644
+index 0000000000..35ea1e8d3d
+--- /dev/null
++++ b/repro_optimize_alterfield.py
+@@ -0,0 +1,19 @@
++
++import sys
++sys.path.insert(0, ".")
++from django.db import models
++from django.db.migrations.operations.fields import AlterField
++from django.db.migrations.optimizer import MigrationOptimizer
++
++# Define three consecutive AlterField operations on the same field.
++ops = [
++    AlterField(model_name="book", name="title", field=models.CharField(max_length=256, null=True)),
++    AlterField(model_name="book", name="title", field=models.CharField(max_length=128, null=True)),
++    AlterField(model_name="book", name="title", field=models.CharField(max_length=128, null=True, help_text="help", default=None)),
++]
++
++opt = MigrationOptimizer()
++res = opt.optimize(ops, "books")
++print("Original len:", len(ops))
++print("Optimized len:", len(res))
++print("Optimized ops:", res)
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 0000000000..607db5b60c
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,52 @@
++Migration optimizer does not reduce multiple AlterField
++Description
++	
++Let's consider the following operations: 
++operations = [
++	migrations.AddField(
++		model_name=book,
++		name=title,
++		field=models.CharField(max_length=256, null=True),
++	),
++	migrations.AlterField(
++		model_name=book,
++		name=title,
++		field=models.CharField(max_length=128, null=True),
++	),
++	migrations.AlterField(
++		model_name=book,
++		name=title,
++		field=models.CharField(max_length=128, null=True, help_text=help),
++	),
++	migrations.AlterField(
++		model_name=book,
++		name=title,
++		field=models.CharField(max_length=128, null=True, help_text=help, default=None),
++	),
++]
++If I run the optimizer, I get only the AddField, as we could expect. However, if the AddField model is separated from the AlterField (e.g. because of a non-elidable migration, or inside a non-squashed migration), none of the AlterField are reduced:
++optimizer.optimize(operations[1:], books) 
++[<AlterField model_name='book', name='title', field=<django.db.models.fields.CharField>>,
++ <AlterField model_name='book', name='title', field=<django.db.models.fields.CharField>>,
++ <AlterField model_name='book', name='title', field=<django.db.models.fields.CharField>>]
++Indeed, the AlterField.reduce does not consider the the case where operation is also an AlterField. 
++Is this behaviour intended? If so, could it be documented? 
++Otherwise, would it make sense to add something like
++		if isinstance(operation, AlterField) and self.is_same_field_operation(
++			operation
++		):
++			return [operation]
++
++Additional insights added:
++- Relevant modules identified:
++  - django/db/migrations/optimizer.py (MigrationOptimizer)
++  - django/db/migrations/operations/fields.py (AlterField operation)
++- Goal: allow optimizer to reduce consecutive AlterField operations on same model/field into the last one when safe.
++
++Repository insights:
++- FieldOperation.reduce() allows optimizing through when the subsequent operation does not reference the same field.
++- AlterField.reduce() previously handled only RemoveField and RenameField cases; it did not coalesce AlterField->AlterField.
++- Implemented coalescing: consecutive AlterField on the same field now reduce to the last AlterField.
++
++New insights:
++- Found dedicated optimizer tests in tests/migrations/test_optimizer.py; will run migrations test suite to validate changes.

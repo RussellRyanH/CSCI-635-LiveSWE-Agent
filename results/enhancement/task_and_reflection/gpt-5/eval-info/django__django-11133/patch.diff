@@ -1,0 +1,108 @@
+diff --git a/django/http/response.py b/django/http/response.py
+index 6a84e193ba..134d17ca43 100644
+--- a/django/http/response.py
++++ b/django/http/response.py
+@@ -229,7 +229,7 @@ class HttpResponseBase:
+         # Handle string types -- we can't rely on force_bytes here because:
+         # - Python attempts str conversion first
+         # - when self._charset != 'utf-8' it re-encodes the content
+-        if isinstance(value, bytes):
++        if isinstance(value, (bytes, bytearray, memoryview)):
+             return bytes(value)
+         if isinstance(value, str):
+             return bytes(value.encode(self.charset))
+@@ -309,7 +309,7 @@ class HttpResponse(HttpResponseBase):
+     @content.setter
+     def content(self, value):
+         # Consume iterators upon assignment to allow repeated iteration.
+-        if hasattr(value, '__iter__') and not isinstance(value, (bytes, str)):
++        if hasattr(value, '__iter__') and not isinstance(value, (bytes, str, bytearray, memoryview)):
+             content = b''.join(self.make_bytes(chunk) for chunk in value)
+             if hasattr(value, 'close'):
+                 try:
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..9ab4706010
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,9 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task, if you have learned any additional information about the task that should be added to the task description, or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Note that the task description can be changed by modifying the task_description.txt file directly. Anytime you execute commands that provide insight into the issue you are solving, you MUST add these insights to the task description before proceeding!
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++
++Workflow reminders appended:
++- When normalizing response content, always consider buffer-protocol types (memoryview, bytearray) in both make_bytes() and content setters.
++- After inspecting source for root causes, immediately document findings in task_description.txt to maintain traceability.
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 0000000000..c5425b6f7f
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,26 @@
++HttpResponse doesn't handle memoryview objects
++Description
++	
++I am trying to write a BinaryField retrieved from the database into a HttpResponse. When the database is Sqlite this works correctly, but Postgresql returns the contents of the field as a memoryview object and it seems like current Django doesn't like this combination:
++from django.http import HttpResponse																	 
++# String content
++response = HttpResponse(My Content)																			
++response.content																								 
++# Out: b'My Content'
++# This is correct
++# Bytes content
++response = HttpResponse(bMy Content)																		 
++response.content																								 
++# Out: b'My Content'
++# This is also correct
++# memoryview content
++response = HttpResponse(memoryview(bMy Content))															 
++response.content
++# Out: b'<memory at 0x7fcc47ab2648>'
++# This is not correct, I am expecting b'My Content'
++
++
++Additional insights discovered:
++- django/http/response.py HttpResponseBase.make_bytes only handled bytes and str; memoryview/bytearray fell through to str(value).encode(), producing b'<memory at 0x...>' instead of the raw bytes.
++- HttpResponse.content setter treated any iterable not in (bytes, str) as an iterator of chunks; memoryview is iterable of ints, so it was joined as transformed chunks. We must treat memoryview/bytearray as bytes-like, not iterables of chunks.
++- Fix implemented: make_bytes now treats (bytes, bytearray, memoryview) uniformly via bytes(value); content setter excludes memoryview/bytearray from the iterable path.
+diff --git a/tools/edit_file.py b/tools/edit_file.py
+new file mode 100644
+index 0000000000..3e08a131fb
+--- /dev/null
++++ b/tools/edit_file.py
+@@ -0,0 +1,33 @@
++#!/usr/bin/env python3
++import sys, re, pathlib
++def replace_in_file(path, replacements):
++    p = pathlib.Path(path)
++    s = p.read_text()
++    orig = s
++    for pat, repl, count in replacements:
++        s_new, n = re.subn(pat, repl, s, count=count, flags=re.MULTILINE)
++        if n == 0:
++            print(f"[WARN] Pattern not found in {path}: {pat}", file=sys.stderr)
++        s = s_new
++    if s != orig:
++        p.write_text(s)
++        print(f"[OK] Patched {path}")
++    else:
++        print(f"[INFO] No changes made to {path}")
++def main():
++    if len(sys.argv) < 2:
++        print("Usage: edit_file.py <file>", file=sys.stderr)
++        sys.exit(2)
++    path = sys.argv[1]
++    # Apply targeted replacements:
++    replacements = [
++        # In make_bytes: handle bytes-like (bytes, bytearray, memoryview)
++        (r"if isinstance\(value, bytes\):\s*\n\s*return bytes\(value\)",
++         "if isinstance(value, (bytes, bytearray, memoryview)):\n            return bytes(value)", 1),
++        # In HttpResponse.content.setter: don't treat memoryview/bytearray as iterable chunks
++        (r"not isinstance\(value, \(bytes, str\)\)",
++         "not isinstance(value, (bytes, str, bytearray, memoryview))", 1),
++    ]
++    replace_in_file(path, replacements)
++if __name__ == "__main__":
++    main()

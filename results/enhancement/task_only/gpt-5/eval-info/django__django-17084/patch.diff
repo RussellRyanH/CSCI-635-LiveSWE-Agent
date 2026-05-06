@@ -1,0 +1,87 @@
+diff --git a/REFLECTION_PROMPT_PATH b/REFLECTION_PROMPT_PATH
+new file mode 100644
+index 0000000000..8b13789179
+--- /dev/null
++++ b/REFLECTION_PROMPT_PATH
+@@ -0,0 +1 @@
++
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index 13a6809dd8..1c3cf608d1 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -403,6 +403,8 @@ class Query(BaseExpression):
+         # Store annotation mask prior to temporarily adding aggregations for
+         # resolving purpose to facilitate their subsequent removal.
+         refs_subquery = False
++        refs_over_clause = False
++        aggs_over_clause = False
+         replacements = {}
+         annotation_select_mask = self.annotation_select_mask
+         for alias, aggregate_expr in aggregate_exprs.items():
+@@ -410,6 +412,7 @@ class Query(BaseExpression):
+             aggregate = aggregate_expr.resolve_expression(
+                 self, allow_joins=True, reuse=None, summarize=True
+             )
++            aggs_over_clause = aggs_over_clause or getattr(aggregate, "contains_over_clause", False)
+             if not aggregate.contains_aggregate:
+                 raise TypeError("%s is not an aggregate expression" % alias)
+             # Temporarily add aggregate to annotations to allow remaining
+@@ -419,6 +422,10 @@ class Query(BaseExpression):
+                 getattr(self.annotations[ref], "subquery", False)
+                 for ref in aggregate.get_refs()
+             )
++            refs_over_clause |= any(
++                getattr(self.annotations[ref], "contains_over_clause", False)
++                for ref in aggregate.get_refs()
++            )
+             aggregate = aggregate.replace_expressions(replacements)
+             self.annotations[alias] = aggregate
+             replacements[Ref(alias, aggregate)] = aggregate
+@@ -454,6 +461,8 @@ class Query(BaseExpression):
+             or qualify
+             or self.distinct
+             or self.combinator
++            or refs_over_clause
++            or aggs_over_clause
+         ):
+             from django.db.models.sql.subqueries import AggregateQuery
+ 
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 0000000000..47bf6335d1
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,33 @@
++Cannot use aggregate over window functions since 4.2
++Description
++	 
++		(last modified by younes-chaoui)
++	 
++After upgrading to Django 4.2, I encountered an exception when executing ORM queries that involve aggregates over Window functions. The specific error was psycopg2.errors.GroupingError: aggregate function calls cannot contain window function calls
++Dependencies :
++psycopg2 version: 2.9.3
++django version: 4.2.3
++PostgreSQL version: 13.4
++Example Code:
++queryset = queryset.annotate(
++	cumul_DJR=Coalesce(Window(Sum(DJR), order_by=F(date).asc()), 0.0)
++)
++aggregate = queryset.aggregate(
++	DJR_total=Sum(DJR),
++	cumul_DJR_total=Sum(cumul_DJR)
++)
++
++---
++Additional insights (from repository inspection on 2026-05-05):
++- The working directory is the Django framework source code (contains django/ package, tests/, docs/, etc.).
++- The reported error arises when performing an aggregate over a Window()-based annotation. PostgreSQL prohibits window functions inside aggregate function calls in the same SELECT list; such queries must be structured using a subquery/CTE (compute window values first, then aggregate in an outer query).
++- This likely used to be implicitly handled pre-4.2 but regressed in 4.2.x. A robust, general fix probably involves ensuring that QuerySet.aggregate() (or related SQL compilation paths) detects when aggregates reference Window expressions (possibly wrapped in Coalesce or other functions) and automatically performs aggregation in an outer query/subquery.
++- Suspected implementation areas to review:
++  - django/db/models/query.py (QuerySet.aggregate and annotation handling)
++  - django/db/models/sql/query.py (query compilation, aggregation paths, subquery usage)
++  - django/db/models/expressions.py (Window and related expression resolution)
++- Goal: When an aggregate references an annotation that compiles to a window function, Django should generate a subquery (or CTE) to evaluate the window first, then apply the aggregate in the outer query to comply with PostgreSQL rules.
++- Additional implementation note (2026-05-05): In django/db/models/sql/query.py::Query.get_aggregation(), force subquerying when aggregates contain or reference window expressions (expressions with contains_over_clause=True), similar to how refs_subquery is handled. This prevents generating SQL where aggregate functions directly wrap window expressions, which PostgreSQL forbids.
++- Reproduction note (2026-05-05): On SQLite, using Coalesce(..., 0.0) with a windowed Sum over an IntegerField triggers a mixed-type output_field error (IntegerField vs FloatField). Use Coalesce(..., 0) or explicitly Cast to maintain consistent types during reproduction.
++- Reproduction note (2026-05-05): On SQLite, using Coalesce(..., 0.0) with a windowed Sum over an IntegerField triggers a mixed-type output_field error (IntegerField vs FloatField). Use Coalesce(..., 0) or explicitly Cast to maintain consistent types during reproduction.
++- Validation note (2026-05-05): Verified locally with an in-memory SQLite setup that annotating with a running total using Window(Sum('val'), order_by=F('date').asc()) and then aggregating over that annotation (Sum('cumul')) now succeeds and returns expected results (val_total=6, cumul_total=10). This indicates that forcing a subquery when aggregates involve window expressions works as intended.
