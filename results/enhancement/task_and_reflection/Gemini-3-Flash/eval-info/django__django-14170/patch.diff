@@ -1,0 +1,119 @@
+diff --git a/django/db/models/lookups.py b/django/db/models/lookups.py
+index 916478d075..80a32a7652 100644
+--- a/django/db/models/lookups.py
++++ b/django/db/models/lookups.py
+@@ -549,7 +549,7 @@ class YearLookup(Lookup):
+     def as_sql(self, compiler, connection):
+         # Avoid the extract operation if the rhs is a direct value to allow
+         # indexes to be used.
+-        if self.rhs_is_direct_value():
++        if self.rhs_is_direct_value() and getattr(self.lhs, 'lookup_name', None) != 'iso_year':
+             # Skip the extract part by directly using the originating field,
+             # that is self.lhs.lhs.
+             lhs_sql, params = self.process_lhs(compiler, connection, self.lhs.lhs)
+diff --git a/edit_file.py b/edit_file.py
+new file mode 100644
+index 0000000000..1f9072b71a
+--- /dev/null
++++ b/edit_file.py
+@@ -0,0 +1,21 @@
++import sys
++
++def edit_file(filename, start_line, end_line, new_content):
++    with open(filename, 'r') as f:
++        lines = f.readlines()
++    
++    # Adjust to 0-indexed
++    start_idx = max(0, start_line - 1)
++    end_idx = end_line
++    
++    lines[start_idx:end_idx] = [new_content]
++    
++    with open(filename, 'w') as f:
++        f.writelines(lines)
++
++if __name__ == "__main__":
++    filename = sys.argv[1]
++    start_line = int(sys.argv[2])
++    end_line = int(sys.argv[3])
++    new_content = sys.stdin.read()
++    edit_file(filename, start_line, end_line, new_content)
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..f74c6daf6c
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,5 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task, if you have learned any additional information about the task that should be added to the task description, or if there are any modifications you can make to the relfection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Note that the task description can be changed by modifying the task_description.txt file directly.
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want.
++
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..3251f3fdbb
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,36 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models.functions import ExtractIsoYear
++from django.db import connection
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DATABASES={
++            'default': {
++                'ENGINE': 'django.db.backends.sqlite3',
++                'NAME': ':memory:',
++            }
++        },
++        INSTALLED_APPS=[],
++    )
++    django.setup()
++
++class DTModel(models.Model):
++    start_date = models.DateField()
++    class Meta:
++        app_label = 'reproduce_app'
++
++print("\nFiltering by iso_year lookup:")
++qs_filter = DTModel.objects.filter(start_date__iso_year=2020)
++print(f"Query: {qs_filter.query}")
++
++print("\nFiltering by annotation:")
++qs_annotated_filter = DTModel.objects.annotate(extracted=ExtractIsoYear('start_date')).filter(extracted=2020)
++print(f"Query: {qs_annotated_filter.query}")
++
++print("\nFiltering by year lookup (optimization should still work):")
++qs_filter_year = DTModel.objects.filter(start_date__year=2020)
++print(f"Query: {qs_filter_year.query}")
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 0000000000..d1f47d0422
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,20 @@
++Query optimization in YearLookup breaks filtering by __iso_year
++Description
++	 
++		(last modified by Florian Demmer)
++	 
++The optimization to use BETWEEN instead of the EXTRACT operation in ​YearLookup is also registered for the ​__iso_year lookup, which breaks the functionality provided by ​ExtractIsoYear when used via the lookup.
++This has unfortunately been broken ever since ExtractIsoYear was introduced in ​Django 2.2 via #28649 and wasn't easy to track down since ExtractIsoYear when used by itself eg. in an annotation works perfectly fine. Just when using the lookup in a filter, the optimization is used (even when explicitly using an annotation):
++# annotation works
++>>> qs = DTModel.objects.annotate(extracted=ExtractIsoYear('start_date')).only('id')
++>>> print(qs.query)
++SELECT db_functions_dtmodel.id, EXTRACT('isoyear' FROM db_functions_dtmodel.start_date) AS extracted FROM db_functions_dtmodel
++# explicit annotation used in filter does not use extracted and adds BETWEEN
++>>> print(qs.filter(extracted=2020).query)
++SELECT db_functions_dtmodel.id, EXTRACT('isoyear' FROM db_functions_dtmodel.start_date) AS extracted FROM db_functions_dtmodel WHERE db_functions_dtmodel.start_date BETWEEN 2020-01-01 AND 2020-12-31
++# implicit lookup uses BETWEEN
++>>> print(DTModel.objects.filter(start_date__iso_year=2020).only('id').query)
++SELECT db_functions_dtmodel.id FROM db_functions_dtmodel WHERE db_functions_dtmodel.start_date BETWEEN 2020-01-01 AND 2020-12-31
++This results in the wrong data being returned by filters using iso_year.
++This PR fixes the behaviour, reverts the invalid changes to the tests and extends one test to catch this problem: ​https://github.com/django/django/pull/14157
++

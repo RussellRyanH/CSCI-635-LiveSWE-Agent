@@ -1,0 +1,191 @@
+diff --git a/TASK_DESCRIPTION_PATH b/TASK_DESCRIPTION_PATH
+new file mode 100644
+index 000000000..4ac4752ed
+--- /dev/null
++++ b/TASK_DESCRIPTION_PATH
+@@ -0,0 +1,13 @@
++LassoLarsIC: unintuitive copy_X behaviour
++Hi, I would like to report what seems to be a bug in the treatment of the copy_X parameter of the LassoLarsIC class. Because it's a simple bug, it's much easier to see in the code directly than in the execution, so I am not posting steps to reproduce it.
++
++As you can see here, LassoLarsIC accepts a copy_X parameter.
++https://github.com/scikit-learn/scikit-learn/blob/7389dbac82d362f296dc2746f10e43ffa1615660/sklearn/linear_model/least_angle.py#L1487
++
++However, it also takes a copy_X parameter a few lines below, in the definition of fit.
++    def fit(self, X, y, copy_X=True):
++
++Now there are two values (potentially contradicting each other) for copy_X and each one is used once. Therefore fit can have a mixed behaviour. Even worse, this can be completely invisible to the user, since copy_X has a default value of True. Let's assume that I'd like it to be False, and have set it to False in the initialization, my_lasso = LassoLarsIC(copy_X=False). I then call my_lasso.fit(X, y) and my choice will be silently overwritten. 
++
++Ideally I think that copy_X should be removed as an argument in fit. No other estimator seems to have a duplication in class parameters and fit arguments (I've checked more than ten in the linear models module). However, this would break existing code. Therefore I propose that fit takes a default value of None and only overwrites the existing value if the user has explicitly passed it as an argument to fit. I will submit a PR to that effect.
++
+diff --git a/patch.py b/patch.py
+new file mode 100644
+index 000000000..015e1417d
+--- /dev/null
++++ b/patch.py
+@@ -0,0 +1,38 @@
++import re
++
++file_path = "sklearn/linear_model/least_angle.py"
++with open(file_path, "r") as f:
++    content = f.read()
++
++# Replace the fit signature
++old_sig = "def fit(self, X, y, copy_X=True):"
++new_sig = "def fit(self, X, y, copy_X=None):"
++content = content.replace(old_sig, new_sig)
++
++# Add fallback logic and replace self.copy_X with copy_X
++# Let's use regex to find the right spot
++pattern = r"(X, y = check_X_y\(X, y, y_numeric=True\))"
++replacement = r"\1\n\n        if copy_X is None:\n            copy_X = self.copy_X\n        else:\n            import warnings\n            warnings.warn(\"The `copy_X` parameter of `LassoLarsIC.fit` is deprecated and will be removed in 0.23. Use the `copy_X` parameter of `LassoLarsIC.__init__` instead.\", DeprecationWarning)"
++# Wait, let me check what scikit-learn developers usually do. Maybe no deprecation warning, just fallback? The PR description says "only overwrites the existing value if the user has explicitly passed it". I will just do the fallback.
++
++replacement = r"\1\n\n        if copy_X is None:\n            copy_X = self.copy_X"
++content = re.sub(pattern, replacement, content)
++
++# Replace self.copy_X with copy_X in the _preprocess_data call
++old_preprocess = """        X, y, Xmean, ymean, Xstd = LinearModel._preprocess_data(
++            X, y, self.fit_intercept, self.normalize, self.copy_X)"""
++new_preprocess = """        X, y, Xmean, ymean, Xstd = LinearModel._preprocess_data(
++            X, y, self.fit_intercept, self.normalize, copy_X)"""
++content = content.replace(old_preprocess, new_preprocess)
++
++# Replace the parameter docstring copy_X : boolean, optional, default True -> None
++old_docstring = """copy_X : boolean, optional, default True
++            If ``True``, X will be copied; else, it may be overwritten."""
++new_docstring = """copy_X : boolean, optional, default None
++            If ``True``, X will be copied; else, it may be overwritten.
++            If ``None``, the ``copy_X`` parameter from the initialization
++            is used."""
++content = content.replace(old_docstring, new_docstring)
++
++with open(file_path, "w") as f:
++    f.write(content)
+diff --git a/patch2.py b/patch2.py
+new file mode 100644
+index 000000000..0b578837e
+--- /dev/null
++++ b/patch2.py
+@@ -0,0 +1,26 @@
++import re
++
++file_path = "sklearn/linear_model/least_angle.py"
++with open(file_path, "r") as f:
++    lines = f.readlines()
++
++in_lassolarsic = False
++in_fit = False
++
++for i, line in enumerate(lines):
++    if "class LassoLarsIC" in line:
++        in_lassolarsic = True
++    elif in_lassolarsic and "def fit(self, X, y, copy_X=True):" in line:
++        lines[i] = line.replace("copy_X=True", "copy_X=None")
++        in_fit = True
++    elif in_lassolarsic and in_fit and "copy_X : boolean, optional, default True" in line:
++        lines[i] = line.replace("default True", "default None")
++        # we also need to add the description
++        lines.insert(i+2, "            If ``None``, the ``copy_X`` parameter from the initialization\n            is used.\n")
++    elif in_lassolarsic and in_fit and "X, y = check_X_y(X, y, y_numeric=True)" in line:
++        lines.insert(i+1, "\n        if copy_X is None:\n            copy_X = self.copy_X\n")
++    elif in_lassolarsic and in_fit and "self.copy_X)" in line and "LinearModel._preprocess_data(" in lines[i-1]:
++        lines[i] = line.replace("self.copy_X", "copy_X")
++
++with open(file_path, "w") as f:
++    f.writelines(lines)
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 000000000..ba706bf20
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,4 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Also note, at any step, you may choose to update your reflection prompt by editing reflection_prompt.txt instead of executing a bash command. 
++
+diff --git a/reproduce.py b/reproduce.py
+new file mode 100644
+index 000000000..f9188d86c
+--- /dev/null
++++ b/reproduce.py
+@@ -0,0 +1,8 @@
++import numpy as np
++from sklearn.linear_model import LassoLarsIC
++
++X = np.random.rand(10, 5)
++y = np.random.rand(10)
++
++my_lasso = LassoLarsIC(copy_X=False)
++my_lasso.fit(X, y)
+diff --git a/sklearn/linear_model/least_angle.py b/sklearn/linear_model/least_angle.py
+index 03b34a0dc..72104fbaf 100644
+--- a/sklearn/linear_model/least_angle.py
++++ b/sklearn/linear_model/least_angle.py
+@@ -1479,7 +1479,7 @@ class LassoLarsIC(LassoLars):
+         self.eps = eps
+         self.fit_path = True
+ 
+-    def fit(self, X, y, copy_X=True):
++    def fit(self, X, y, copy_X=None):
+         """Fit the model using X, y as training data.
+ 
+         Parameters
+@@ -1490,8 +1490,10 @@ class LassoLarsIC(LassoLars):
+         y : array-like, shape (n_samples,)
+             target values. Will be cast to X's dtype if necessary
+ 
+-        copy_X : boolean, optional, default True
++        copy_X : boolean, optional, default None
+             If ``True``, X will be copied; else, it may be overwritten.
++            If ``None``, the ``copy_X`` parameter from the initialization
++            is used.
+ 
+         Returns
+         -------
+@@ -1500,8 +1502,11 @@ class LassoLarsIC(LassoLars):
+         """
+         X, y = check_X_y(X, y, y_numeric=True)
+ 
++        if copy_X is None:
++            copy_X = self.copy_X
++
+         X, y, Xmean, ymean, Xstd = LinearModel._preprocess_data(
+-            X, y, self.fit_intercept, self.normalize, self.copy_X)
++            X, y, self.fit_intercept, self.normalize, copy_X)
+         max_iter = self.max_iter
+ 
+         Gram = self.precompute
+diff --git a/verify.py b/verify.py
+new file mode 100644
+index 000000000..a231a2d2c
+--- /dev/null
++++ b/verify.py
+@@ -0,0 +1,28 @@
++import numpy as np
++from sklearn.linear_model import LassoLarsIC
++
++X = np.random.rand(10, 5)
++X_copy = X.copy()
++y = np.random.rand(10)
++
++my_lasso = LassoLarsIC(copy_X=False)
++my_lasso.fit(X, y)
++
++# Since copy_X=False, and normalize=True by default, X should be modified in-place
++if np.allclose(X, X_copy):
++    print("X was NOT modified! copy_X=False might not be respected.")
++else:
++    print("X was modified! copy_X=False is respected.")
++
++# Now test passing explicitly copy_X=True to fit
++X2 = np.random.rand(10, 5)
++X2_copy = X2.copy()
++y2 = np.random.rand(10)
++
++my_lasso2 = LassoLarsIC(copy_X=False)
++my_lasso2.fit(X2, y2, copy_X=True)
++
++if np.allclose(X2, X2_copy):
++    print("X2 was NOT modified! Explicit copy_X=True is respected.")
++else:
++    print("X2 was modified! Explicit copy_X=True is ignored.")

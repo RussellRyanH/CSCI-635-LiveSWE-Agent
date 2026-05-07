@@ -1,0 +1,190 @@
+diff --git a/django/forms/boundfield.py b/django/forms/boundfield.py
+index 88adadb37d..3a4849508b 100644
+--- a/django/forms/boundfield.py
++++ b/django/forms/boundfield.py
+@@ -228,6 +228,21 @@ class BoundField:
+             attrs['disabled'] = True
+         return attrs
+ 
++    def _did_change(self):
++        data_value = self.data
++        if not self.field.show_hidden_initial:
++            initial_value = self.initial
++        else:
++            initial_prefixed_name = self.form.add_initial_prefix(self.name)
++            hidden_widget = self.field.hidden_widget()
++            try:
++                initial_value = self.field.to_python(
++                    self.form._widget_data_value(hidden_widget, initial_prefixed_name)
++                )
++            except ValidationError:
++                return True
++        return self.field.has_changed(initial_value, data_value)
++
+     @property
+     def widget_type(self):
+         return re.sub(r'widget$|input$', '', self.field.widget.__class__.__name__.lower())
+diff --git a/django/forms/forms.py b/django/forms/forms.py
+index d14037bfe9..24b3c530a3 100644
+--- a/django/forms/forms.py
++++ b/django/forms/forms.py
+@@ -147,6 +147,10 @@ class BaseForm:
+         for name in self.fields:
+             yield self[name]
+ 
++    def _bound_items(self):
++        for name in self.fields:
++            yield name, self[name]
++
+     def __getitem__(self, name):
+         """Return a BoundField with the given name."""
+         try:
+@@ -387,15 +391,15 @@ class BaseForm:
+         self._post_clean()
+ 
+     def _clean_fields(self):
+-        for name, field in self.fields.items():
++        for name, bf in self._bound_items():
++            field = bf.field
+             if field.disabled:
+-                value = self.get_initial_for_field(field, name)
++                value = bf.initial
+             else:
+-                value = self._field_data_value(field, self.add_prefix(name))
++                value = bf.data
+             try:
+                 if isinstance(field, FileField):
+-                    initial = self.get_initial_for_field(field, name)
+-                    value = field.clean(value, initial)
++                    value = field.clean(value, bf.initial)
+                 else:
+                     value = field.clean(value)
+                 self.cleaned_data[name] = value
+@@ -436,27 +440,7 @@ class BaseForm:
+ 
+     @cached_property
+     def changed_data(self):
+-        data = []
+-        for name, field in self.fields.items():
+-            data_value = self._field_data_value(field, self.add_prefix(name))
+-            if not field.show_hidden_initial:
+-                # Use the BoundField's initial as this is the value passed to
+-                # the widget.
+-                initial_value = self[name].initial
+-            else:
+-                initial_prefixed_name = self.add_initial_prefix(name)
+-                hidden_widget = field.hidden_widget()
+-                try:
+-                    initial_value = field.to_python(
+-                        self._widget_data_value(hidden_widget, initial_prefixed_name)
+-                    )
+-                except ValidationError:
+-                    # Always assume data has changed if validation fails.
+-                    data.append(name)
+-                    continue
+-            if field.has_changed(initial_value, data_value):
+-                data.append(name)
+-        return data
++        return [name for name, bf in self._bound_items() if bf._did_change()]
+ 
+     @property
+     def media(self):
+diff --git a/edit_file.py b/edit_file.py
+new file mode 100644
+index 0000000000..e812bb36b2
+--- /dev/null
++++ b/edit_file.py
+@@ -0,0 +1,25 @@
++import sys
++
++def edit_file(file_path, old_text, new_text):
++    try:
++        with open(file_path, 'r') as f:
++            content = f.read()
++        if old_text not in content:
++            print(f"Error: Could not find the text to replace in {file_path}")
++            return False
++        new_content = content.replace(old_text, new_text)
++        with open(file_path, 'w') as f:
++            f.write(new_content)
++        print(f"Successfully edited {file_path}")
++        return True
++    except Exception as e:
++        print(f"Error: {e}")
++        return False
++
++if __name__ == "__main__":
++    if len(sys.argv) != 4:
++        print("Usage: python edit_file.py <file_path> <old_text> <new_text>")
++        sys.exit(1)
++    file_path, old_text, new_text = sys.argv[1:]
++    if not edit_file(file_path, old_text, new_text):
++        sys.exit(1)
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..f74c6daf6c
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,5 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task, if you have learned any additional information about the task that should be added to the task description, or if there are any modifications you can make to the relfection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Note that the task description can be changed by modifying the task_description.txt file directly.
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want.
++
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..df3764a4a2
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,32 @@
++import os
++import django
++from django import forms
++from django.conf import settings
++from datetime import datetime
++
++if not settings.configured:
++    settings.configure()
++    django.setup()
++
++class MyForm(forms.Form):
++    date = forms.DateTimeField(initial=datetime.now, disabled=True)
++
++def test_initial_consistency():
++    form = MyForm(data={'date': '2021-01-01 00:00:00'})
++    # Accessing form['date'].initial should trigger the callable
++    bf_initial = form['date'].initial
++    
++    # Accessing form.cleaned_data['date'] after full_clean
++    form.full_clean()
++    clean_value = form.cleaned_data['date']
++    
++    print(f"BoundField initial: {bf_initial}")
++    print(f"Cleaned data value: {clean_value}")
++    
++    if bf_initial != clean_value:
++        print("Inconsistency detected!")
++    else:
++        print("Values are consistent.")
++
++if __name__ == "__main__":
++    test_initial_consistency()
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 0000000000..b8d4107577
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,13 @@
++BaseForm's _clean_fields() and changed_data should access values via BoundField
++Description
++	 
++		(last modified by Chris Jerdonek)
++	 
++While working on #32917, I noticed that ​BaseForm._clean_fields() and ​BaseForm.changed_data don't currently access their values through a BoundField object. It would be better for consistency if they did, and to reduce the number of code paths.
++One consequence of the current code is that form._clean_fields() can return a different value from form[name].initial when they should be the same. This case is almost, but not quite, covered by ​test_datetime_clean_initial_callable_disabled() (the test can be adjusted to cover this case).
++As part of this ticket and in line with accessing data through the BoundField objects, I noticed that the code would also be simpler if the per-field logic of changed_data() were moved into a method of the BoundField class. It could be called something like bf.did_change(). This would be more appropriate because whether form data changed for a field is a property of its BoundField (as it depends on the underlying form data), as opposed to the unbound field. With this change, the method could change from its current ~20 lines to something like this--
++@cached_property
++def changed_data(self):
++	return [name for name, bf in self._bound_items() if bf._did_change()]
++A similar change could be made to BaseForm._clean_fields().
++

@@ -1,0 +1,367 @@
+diff --git a/REFLECTION_PROMPT_PATH b/REFLECTION_PROMPT_PATH
+new file mode 100644
+index 0000000000..8b13789179
+--- /dev/null
++++ b/REFLECTION_PROMPT_PATH
+@@ -0,0 +1 @@
++
+diff --git a/django/core/management/__init__.py b/django/core/management/__init__.py
+index 5f2e64761e..e356ccc6c8 100644
+--- a/django/core/management/__init__.py
++++ b/django/core/management/__init__.py
+@@ -120,11 +120,21 @@ def call_command(command_name, *args, **options):
+     arg_options = {opt_mapping.get(key, key): value for key, value in options.items()}
+     parse_args = [str(a) for a in args]
+ 
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++
+     def get_actions(parser):
+         # Parser actions and actions from sub-parser choices.
+         for opt in parser._actions:
+             if isinstance(opt, _SubParsersAction):
+                 for sub_opt in opt.choices.values():
++                    for group in sub_opt._mutually_exclusive_groups:
++                        if group.required:
++                            mutually_exclusive_required_options.update(group._group_actions)
+                     yield from get_actions(sub_opt)
+             else:
+                 yield opt
+@@ -134,7 +144,7 @@ def call_command(command_name, *args, **options):
+     # to parse_args().
+     parse_args += [
+         '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
+-        for opt in parser_actions if opt.required and opt.dest in options
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
+     ]
+     defaults = parser.parse_args(args=parse_args)
+     defaults = dict(defaults._get_kwargs(), **arg_options)
+diff --git a/edit_call_command.py b/edit_call_command.py
+new file mode 100644
+index 0000000000..817447423b
+--- /dev/null
++++ b/edit_call_command.py
+@@ -0,0 +1,35 @@
++import re
++
++with open('django/core/management/__init__.py', 'r') as f:
++    content = f.read()
++
++# Find the place where parser_actions is defined and parse_args is extended
++old_code = """    parser_actions = list(get_actions(parser))
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if opt.required and opt.dest in options
++    ]"""
++
++new_code = """    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++if old_code in content:
++    content = content.replace(old_code, new_code)
++    with open('django/core/management/__init__.py', 'w') as f:
++        f.write(content)
++    print("Successfully patched call_command")
++else:
++    print("Could not find the target codeblock!")
+diff --git a/fix_call_command.py b/fix_call_command.py
+new file mode 100644
+index 0000000000..2ba02a3282
+--- /dev/null
++++ b/fix_call_command.py
+@@ -0,0 +1,88 @@
++import re
++
++with open('django/core/management/__init__.py', 'r') as f:
++    content = f.read()
++
++old_code = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if opt.required and opt.dest in options
++    ]"""
++
++new_code = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++# Wait, the above doesn't get groups recursively from subparsers.
++# Let's adjust new_code to get mutually exclusive groups recursively.
++
++new_code_recursive = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++    def extract_subparser_groups(parser):
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    for group in sub_opt._mutually_exclusive_groups:
++                        if group.required:
++                            mutually_exclusive_required_options.update(group._group_actions)
++                    extract_subparser_groups(sub_opt)
++    extract_subparser_groups(parser)
++
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++if old_code in content:
++    content = content.replace(old_code, new_code_recursive)
++    with open('django/core/management/__init__.py', 'w') as f:
++        f.write(content)
++    print("Successfully patched call_command")
++else:
++    print("Could not find the target codeblock!")
+diff --git a/fix_call_command2.py b/fix_call_command2.py
+new file mode 100644
+index 0000000000..1974ca393a
+--- /dev/null
++++ b/fix_call_command2.py
+@@ -0,0 +1,56 @@
++import re
++
++with open('django/core/management/__init__.py', 'r') as f:
++    content = f.read()
++
++old_code = """    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if opt.required and opt.dest in options
++    ]"""
++
++new_code = """    mutually_exclusive_required_options = {
++        opt
++        for group in parser._mutually_exclusive_groups
++        if group.required
++        for opt in group._group_actions
++    }
++
++    def get_actions(parser):
++        # Parser actions and actions from sub-parser choices.
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    for group in sub_opt._mutually_exclusive_groups:
++                        if group.required:
++                            mutually_exclusive_required_options.update(group._group_actions)
++                    yield from get_actions(sub_opt)
++            else:
++                yield opt
++
++    parser_actions = list(get_actions(parser))
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args().
++    parse_args += [
++        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++        for opt in parser_actions if (opt.required or opt in mutually_exclusive_required_options) and opt.dest in options
++    ]"""
++
++if old_code in content:
++    content = content.replace(old_code, new_code)
++    with open('django/core/management/__init__.py', 'w') as f:
++        f.write(content)
++    print("Successfully patched call_command with improved logic")
++else:
++    print("Could not find the target codeblock!")
+diff --git a/reproduce.py b/reproduce.py
+new file mode 100644
+index 0000000000..cc37ea718a
+--- /dev/null
++++ b/reproduce.py
+@@ -0,0 +1,49 @@
++import os
++import django
++from django.conf import settings
++from django.core.management import call_command, BaseCommand
++from django.core.management.base import CommandError
++
++# Configure minimal Django settings
++settings.configure(
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    }
++)
++django.setup()
++
++class Command(BaseCommand):
++    def add_arguments(self, parser):
++        shop = parser.add_mutually_exclusive_group(required=True)
++        shop.add_argument('--shop-id', nargs='?', type=int, default=None, dest='shop_id')
++        shop.add_argument('--shop', nargs='?', type=str, default=None, dest='shop_name')
++
++    def handle(self, *args, **options):
++        print("Command executed successfully!")
++        print("Shop ID:", options.get('shop_id'))
++        print("Shop Name:", options.get('shop_name'))
++
++# Mock the command registry
++from django.core.management import get_commands, BaseCommand
++import django.core.management
++
++# We need to register this command so call_command can find it
++# We can just pass the command instance directly!
++cmd = Command()
++try:
++    print("Calling with --shop-id=1 as arg")
++    call_command(cmd, '--shop-id=1')
++except Exception as e:
++    print("Error:", e)
++
++try:
++    print("\nCalling with shop_id=1 as kwarg")
++    call_command(cmd, shop_id=1)
++except Exception as e:
++    print("Error:", type(e).__name__, e)
+diff --git a/reproduce2.py b/reproduce2.py
+new file mode 100644
+index 0000000000..8e1efc0a63
+--- /dev/null
++++ b/reproduce2.py
+@@ -0,0 +1,13 @@
++import argparse
++
++parser = argparse.ArgumentParser()
++group = parser.add_mutually_exclusive_group(required=True)
++group.add_argument('--shop-id', dest='shop_id')
++group.add_argument('--shop', dest='shop_name')
++
++print("Mutually exclusive groups:", parser._mutually_exclusive_groups)
++for g in parser._mutually_exclusive_groups:
++    print(f"Group required: {g.required}")
++    print(f"Group actions: {g._group_actions}")
++    for action in g._group_actions:
++        print(f"Action: {action.dest}")
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 0000000000..386b28e6ff
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,22 @@
++call_command fails when argument of required mutually exclusive group is passed in kwargs.
++Description
++	
++This error 
++django.core.management.base.CommandError: Error: one of the arguments --shop-id --shop is required
++is raised when I run 
++call_command('my_command', shop_id=1)
++the argument 'shop_id' is part of a required mutually exclusive group:
++shop = parser.add_mutually_exclusive_group(required=True)
++shop.add_argument('--shop-id', nargs='?', type=int, default=None, dest='shop_id')
++shop.add_argument('--shop', nargs='?', type=str, default=None, dest='shop_name')
++However, everything is fine when I call this command in this way:
++call_command('my_command, '--shop-id=1')
++In django sources I found that only those keyword arguments of call_command are passed to the parser that are defined as required:
++# Any required arguments which are passed in via '**options' must be passed
++# to parse_args().
++parse_args += [
++	'{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++	for opt in parser._actions if opt.required and opt.dest in options
++]
++but in this special case both of them individually are not required, they are actually part of a group that is required. And the code of call_command does nothing with groups defined in the parser.
++
+diff --git a/test_subparsers.py b/test_subparsers.py
+new file mode 100644
+index 0000000000..a116c38d97
+--- /dev/null
++++ b/test_subparsers.py
+@@ -0,0 +1,20 @@
++import argparse
++
++parser = argparse.ArgumentParser()
++subparsers = parser.add_subparsers(dest='command')
++sub_parser = subparsers.add_parser('sub')
++group = sub_parser.add_mutually_exclusive_group(required=True)
++group.add_argument('--sub-opt1')
++group.add_argument('--sub-opt2')
++
++def get_mutually_exclusive_groups(parser):
++    groups = list(parser._mutually_exclusive_groups)
++    for opt in parser._actions:
++        if isinstance(opt, argparse._SubParsersAction):
++            for sub_opt in opt.choices.values():
++                groups.extend(get_mutually_exclusive_groups(sub_opt))
++    return groups
++
++print("All ME groups:")
++for g in get_mutually_exclusive_groups(parser):
++    print(g, "required:", g.required)

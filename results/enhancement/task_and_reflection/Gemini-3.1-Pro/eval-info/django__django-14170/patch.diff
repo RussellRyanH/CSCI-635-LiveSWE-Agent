@@ -1,0 +1,105 @@
+diff --git a/django/db/models/functions/datetime.py b/django/db/models/functions/datetime.py
+index 90e6f41be0..3e140bfa84 100644
+--- a/django/db/models/functions/datetime.py
++++ b/django/db/models/functions/datetime.py
+@@ -164,11 +164,6 @@ ExtractYear.register_lookup(YearGte)
+ ExtractYear.register_lookup(YearLt)
+ ExtractYear.register_lookup(YearLte)
+ 
+-ExtractIsoYear.register_lookup(YearExact)
+-ExtractIsoYear.register_lookup(YearGt)
+-ExtractIsoYear.register_lookup(YearGte)
+-ExtractIsoYear.register_lookup(YearLt)
+-ExtractIsoYear.register_lookup(YearLte)
+ 
+ 
+ class Now(Func):
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..f74c6daf6c
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,5 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task, if you have learned any additional information about the task that should be added to the task description, or if there are any modifications you can make to the relfection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Note that the task description can be changed by modifying the task_description.txt file directly.
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want.
++
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 0000000000..d1f47d0422
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,20 @@
++Query optimization in YearLookup breaks filtering by __iso_year
++Description
++	 
++		(last modified by Florian Demmer)
++	 
++The optimization to use BETWEEN instead of the EXTRACT operation in ​YearLookup is also registered for the ​__iso_year lookup, which breaks the functionality provided by ​ExtractIsoYear when used via the lookup.
++This has unfortunately been broken ever since ExtractIsoYear was introduced in ​Django 2.2 via #28649 and wasn't easy to track down since ExtractIsoYear when used by itself eg. in an annotation works perfectly fine. Just when using the lookup in a filter, the optimization is used (even when explicitly using an annotation):
++# annotation works
++>>> qs = DTModel.objects.annotate(extracted=ExtractIsoYear('start_date')).only('id')
++>>> print(qs.query)
++SELECT db_functions_dtmodel.id, EXTRACT('isoyear' FROM db_functions_dtmodel.start_date) AS extracted FROM db_functions_dtmodel
++# explicit annotation used in filter does not use extracted and adds BETWEEN
++>>> print(qs.filter(extracted=2020).query)
++SELECT db_functions_dtmodel.id, EXTRACT('isoyear' FROM db_functions_dtmodel.start_date) AS extracted FROM db_functions_dtmodel WHERE db_functions_dtmodel.start_date BETWEEN 2020-01-01 AND 2020-12-31
++# implicit lookup uses BETWEEN
++>>> print(DTModel.objects.filter(start_date__iso_year=2020).only('id').query)
++SELECT db_functions_dtmodel.id FROM db_functions_dtmodel WHERE db_functions_dtmodel.start_date BETWEEN 2020-01-01 AND 2020-12-31
++This results in the wrong data being returned by filters using iso_year.
++This PR fixes the behaviour, reverts the invalid changes to the tests and extends one test to catch this problem: ​https://github.com/django/django/pull/14157
++
+diff --git a/test_iso_year.py b/test_iso_year.py
+new file mode 100644
+index 0000000000..7ab9b7e047
+--- /dev/null
++++ b/test_iso_year.py
+@@ -0,0 +1,46 @@
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++    ]
++)
++
++django.setup()
++
++from django.db import models
++from django.db.models.functions import ExtractIsoYear
++
++class DTModel(models.Model):
++    start_date = models.DateField()
++
++    class Meta:
++        app_label = 'contenttypes'
++
++# Create the table
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(DTModel)
++
++# Print the SQL queries as described in the PR
++qs = DTModel.objects.annotate(extracted=ExtractIsoYear('start_date')).only('id')
++print("Annotation query:")
++print(qs.query)
++print("-" * 50)
++
++print("Explicit annotation used in filter query:")
++print(qs.filter(extracted=2020).query)
++print("-" * 50)
++
++print("Implicit lookup query:")
++print(DTModel.objects.filter(start_date__iso_year=2020).only('id').query)
++print("-" * 50)
