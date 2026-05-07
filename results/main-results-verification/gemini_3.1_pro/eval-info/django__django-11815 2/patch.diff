@@ -1,0 +1,237 @@
+diff --git a/django/db/migrations/serializer.py b/django/db/migrations/serializer.py
+index 27b5cbd379..d55c3e0c17 100644
+--- a/django/db/migrations/serializer.py
++++ b/django/db/migrations/serializer.py
+@@ -120,6 +120,11 @@ class EnumSerializer(BaseSerializer):
+     def serialize(self):
+         enum_class = self.value.__class__
+         module = enum_class.__module__
++        if getattr(self.value, 'name', None) is not None:
++            return (
++                '%s.%s[%r]' % (module, enum_class.__name__, self.value.name),
++                {'import %s' % module},
++            )
+         v_string, v_imports = serializer_factory(self.value.value).serialize()
+         imports = {'import %s' % module, *v_imports}
+         return "%s.%s(%s)" % (module, enum_class.__name__, v_string), imports
+diff --git a/fix_test_writer.py b/fix_test_writer.py
+new file mode 100644
+index 0000000000..9fbbf633c3
+--- /dev/null
++++ b/fix_test_writer.py
+@@ -0,0 +1,65 @@
++with open('tests/migrations/test_writer.py', 'r', encoding='utf-8') as f:
++    content = f.read()
++
++# Fix test_serialize_enums
++content = content.replace(
++    "(\"migrations.test_writer.TextEnum('a-value')\", {'import migrations.test_writer'})",
++    "(\"migrations.test_writer.TextEnum['A']\", {'import migrations.test_writer'})"
++)
++content = content.replace(
++    "(\"migrations.test_writer.BinaryEnum(b'a-value')\", {'import migrations.test_writer'})",
++    "(\"migrations.test_writer.BinaryEnum['A']\", {'import migrations.test_writer'})"
++)
++content = content.replace(
++    "(\"migrations.test_writer.IntEnum(2)\", {'import migrations.test_writer'})",
++    "(\"migrations.test_writer.IntEnum['B']\", {'import migrations.test_writer'})"
++)
++
++content = content.replace(
++    "('a-value', migrations.test_writer.TextEnum('a-value')), ",
++    "('a-value', migrations.test_writer.TextEnum['A']), "
++)
++content = content.replace(
++    "('value-b', migrations.test_writer.TextEnum('value-b'))], ",
++    "('value-b', migrations.test_writer.TextEnum['B'])], "
++)
++content = content.replace(
++    "default=migrations.test_writer.TextEnum('value-b'))",
++    "default=migrations.test_writer.TextEnum['B'])"
++)
++
++content = content.replace(
++    "(b'a-value', migrations.test_writer.BinaryEnum(b'a-value')), ",
++    "(b'a-value', migrations.test_writer.BinaryEnum['A']), "
++)
++content = content.replace(
++    "(b'value-b', migrations.test_writer.BinaryEnum(b'value-b'))], ",
++    "(b'value-b', migrations.test_writer.BinaryEnum['B'])], "
++)
++content = content.replace(
++    "default=migrations.test_writer.BinaryEnum(b'value-b'))",
++    "default=migrations.test_writer.BinaryEnum['B'])"
++)
++
++content = content.replace(
++    "(1, migrations.test_writer.IntEnum(1)), ",
++    "(1, migrations.test_writer.IntEnum['A']), "
++)
++content = content.replace(
++    "(2, migrations.test_writer.IntEnum(2))], ",
++    "(2, migrations.test_writer.IntEnum['B'])], "
++)
++content = content.replace(
++    "default=migrations.test_writer.IntEnum(1))",
++    "default=migrations.test_writer.IntEnum['A'])"
++)
++
++# Fix test_serialize_class_based_validators
++content = content.replace(
++    "self.assertEqual(string, \"django.core.validators.RegexValidator('^[0-9]+$', flags=re.RegexFlag(16))\")",
++    "self.assertEqual(string, \"django.core.validators.RegexValidator('^[0-9]+$', flags=re.RegexFlag['DOTALL'])\")"
++)
++
++with open('tests/migrations/test_writer.py', 'w', encoding='utf-8') as f:
++    f.write(content)
++
+diff --git a/modify_serializer.py b/modify_serializer.py
+new file mode 100644
+index 0000000000..b50b9b9443
+--- /dev/null
++++ b/modify_serializer.py
+@@ -0,0 +1,29 @@
++from django.db.migrations.serializer import serializer_factory
++
++with open('django/db/migrations/serializer.py', 'r') as f:
++    content = f.read()
++
++old_serialize = """    def serialize(self):
++        enum_class = self.value.__class__
++        module = enum_class.__module__
++        return (
++            '%s.%s[%r]' % (module, enum_class.__name__, self.value.name),
++            {'import %s' % module},
++        )"""
++
++new_serialize = """    def serialize(self):
++        enum_class = self.value.__class__
++        module = enum_class.__module__
++        if getattr(self.value, 'name', None) is not None:
++            return (
++                '%s.%s[%r]' % (module, enum_class.__name__, self.value.name),
++                {'import %s' % module},
++            )
++        v_string, v_imports = serializer_factory(self.value.value).serialize()
++        imports = {'import %s' % module, *v_imports}
++        return "%s.%s(%s)" % (module, enum_class.__name__, v_string), imports"""
++
++content = content.replace(old_serialize, new_serialize)
++
++with open('django/db/migrations/serializer.py', 'w') as f:
++    f.write(content)
+diff --git a/reproduce_issue.py b/reproduce_issue.py
+new file mode 100644
+index 0000000000..8c6effcaea
+--- /dev/null
++++ b/reproduce_issue.py
+@@ -0,0 +1,41 @@
++import os
++import django
++from django.conf import settings
++
++# Configure Django settings
++settings.configure(
++    INSTALLED_APPS=[
++        'django.contrib.contenttypes',
++        'testapp',
++    ],
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    USE_I18N=True,
++    LANGUAGE_CODE='en',
++)
++
++django.setup()
++
++import enum
++from django.utils.translation import gettext_lazy as _
++from django.db import models
++from django.db.migrations.serializer import serializer_factory
++
++class Status(enum.Enum):
++    GOOD = _('Good')
++    BAD = _('Bad')
++
++class Item(models.Model):
++    status = models.CharField(default=Status.GOOD, max_length=128)
++
++    class Meta:
++        app_label = 'testapp'
++
++# Let's serialize Status.GOOD
++serializer = serializer_factory(Status.GOOD)
++print(serializer.serialize())
++
+diff --git a/reproduce_issue2.py b/reproduce_issue2.py
+new file mode 100644
+index 0000000000..9f10c18e5d
+--- /dev/null
++++ b/reproduce_issue2.py
+@@ -0,0 +1,9 @@
++import enum
++from django.db.migrations.serializer import EnumSerializer
++
++class Status(enum.Enum):
++    GOOD = 'Good'
++    BAD = 'Bad'
++
++serializer = EnumSerializer(Status.GOOD)
++print(serializer.serialize())
+diff --git a/test_enum_flag.py b/test_enum_flag.py
+new file mode 100644
+index 0000000000..cc5a5dc952
+--- /dev/null
++++ b/test_enum_flag.py
+@@ -0,0 +1,11 @@
++import re
++
++flag = re.IGNORECASE | re.DOTALL
++print(flag)
++print(type(flag))
++print(getattr(flag, 'name', None))
++
++flag2 = re.DOTALL
++print(flag2)
++print(type(flag2))
++print(getattr(flag2, 'name', None))
+diff --git a/test_enum_flag2.py b/test_enum_flag2.py
+new file mode 100644
+index 0000000000..672b9a142c
+--- /dev/null
++++ b/test_enum_flag2.py
+@@ -0,0 +1,18 @@
++import re
++import enum
++
++print(isinstance(re.DOTALL, enum.Enum))
++print(isinstance(re.DOTALL | re.IGNORECASE, enum.Enum))
++print(getattr(re.DOTALL | re.IGNORECASE, 'name', 'missing'))
++
++class MyEnum(enum.Enum):
++    A = 1
++    B = 2
++
++class MyFlag(enum.Flag):
++    A = 1
++    B = 2
++
++print(MyFlag.A | MyFlag.B)
++print(getattr(MyFlag.A | MyFlag.B, 'name', 'missing'))
++
+diff --git a/test_flag_serialize.py b/test_flag_serialize.py
+new file mode 100644
+index 0000000000..5b6d4e2e89
+--- /dev/null
++++ b/test_flag_serialize.py
+@@ -0,0 +1,6 @@
++import re
++from django.db.migrations.serializer import EnumSerializer
++
++flag = re.S | re.I
++serializer = EnumSerializer(flag)
++print(serializer.serialize())

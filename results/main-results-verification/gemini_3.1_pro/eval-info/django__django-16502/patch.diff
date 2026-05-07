@@ -1,60 +1,573 @@
+diff --git a/clean_head.py b/clean_head.py
+new file mode 100644
+index 0000000000..a7071af4fb
+--- /dev/null
++++ b/clean_head.py
+@@ -0,0 +1,17 @@
++with open("django/core/servers/basehttp.py", "r") as f:
++    content = f.read()
++
++search = """    def setup_environ(self):
++        super().setup_environ()
++
++    def send_headers(self):"""
++
++replace = """    def send_headers(self):"""
++
++if search in content:
++    new_content = content.replace(search, replace)
++    with open("django/core/servers/basehttp.py", "w") as f:
++        f.write(new_content)
++    print("Successfully cleaned django/core/servers/basehttp.py")
++else:
++    print("Could not find the search string to clean!")
 diff --git a/django/core/servers/basehttp.py b/django/core/servers/basehttp.py
-index fef5532e58..cfd803ba8f 100644
+index fef5532e58..334615cd4a 100644
 --- a/django/core/servers/basehttp.py
 +++ b/django/core/servers/basehttp.py
-@@ -128,6 +128,21 @@ class ServerHandler(simple_server.ServerHandler):
+@@ -128,6 +128,11 @@ class ServerHandler(simple_server.ServerHandler):
              LimitedStream(stdin, content_length), stdout, stderr, environ, **kwargs
          )
  
-+    def write(self, data):
-+        assert type(data) is bytes, "write() argument must be a bytes instance"
-+        if not self.status:
-+            raise AssertionError("write() before start_response()")
-+        elif not self.headers_sent:
-+            self.bytes_sent = len(data)
-+            self.send_headers()
-+        else:
-+            self.bytes_sent += len(data)
-+
++    def send_headers(self):
++        super().send_headers()
 +        if self.environ.get("REQUEST_METHOD") == "HEAD":
-+            return
-+        self._write(data)
-+        self._flush()
++            self._write = lambda data: None
 +
      def cleanup_headers(self):
          super().cleanup_headers()
          # HTTP/1.1 requires support for persistent connections. Send 'close' if
+diff --git a/edit_tool.py b/edit_tool.py
+new file mode 100644
+index 0000000000..411b6e0b4d
+--- /dev/null
++++ b/edit_tool.py
+@@ -0,0 +1,51 @@
++#!/usr/bin/env python3
++import sys
++
++def main():
++    if len(sys.argv) != 2:
++        print("Usage: python edit_tool.py <file_path>")
++        sys.exit(1)
++        
++    file_path = sys.argv[1]
++    
++    # Read the file
++    try:
++        with open(file_path, 'r') as f:
++            content = f.read()
++    except FileNotFoundError:
++        print(f"Error: File '{file_path}' not found.")
++        sys.exit(1)
++        
++    # Read search and replace patterns from stdin
++    print("Enter the exact block of text to search for, followed by '<<REPLACE>>', followed by the replacement text, followed by '<<EOF>>':")
++    
++    input_text = sys.stdin.read()
++    
++    if "<<REPLACE>>" not in input_text or "<<EOF>>" not in input_text:
++        print("Error: Input must contain '<<REPLACE>>' and end with '<<EOF>>'.")
++        sys.exit(1)
++        
++    search_text = input_text.split("<<REPLACE>>")[0].strip('\n')
++    replace_text = input_text.split("<<REPLACE>>")[1].split("<<EOF>>")[0].strip('\n')
++    
++    if search_text not in content:
++        print("Error: Search text not found in the file.")
++        print(f"Search text length: {len(search_text)}")
++        print("--- Search text ---")
++        print(search_text)
++        print("-------------------")
++        sys.exit(1)
++        
++    if content.count(search_text) > 1:
++        print("Error: Search text found multiple times in the file. Please provide a more specific block.")
++        sys.exit(1)
++        
++    new_content = content.replace(search_text, replace_text)
++    
++    with open(file_path, 'w') as f:
++        f.write(new_content)
++        
++    print(f"Successfully updated {file_path}")
++
++if __name__ == "__main__":
++    main()
+diff --git a/fix_head.py b/fix_head.py
+new file mode 100644
+index 0000000000..670d2f1e0c
+--- /dev/null
++++ b/fix_head.py
+@@ -0,0 +1,24 @@
++with open("django/core/servers/basehttp.py", "r") as f:
++    content = f.read()
++
++search = """    def cleanup_headers(self):
++        super().cleanup_headers()"""
++
++replace = """    def setup_environ(self):
++        super().setup_environ()
++
++    def send_headers(self):
++        super().send_headers()
++        if self.environ.get("REQUEST_METHOD") == "HEAD":
++            self._write = lambda data: None
++
++    def cleanup_headers(self):
++        super().cleanup_headers()"""
++
++if search in content:
++    new_content = content.replace(search, replace)
++    with open("django/core/servers/basehttp.py", "w") as f:
++        f.write(new_content)
++    print("Successfully patched django/core/servers/basehttp.py")
++else:
++    print("Could not find the search string!")
 diff --git a/test_head.py b/test_head.py
 new file mode 100644
-index 0000000000..8cbd797515
+index 0000000000..fc632244b3
 --- /dev/null
 +++ b/test_head.py
-@@ -0,0 +1,28 @@
-+import urllib.request
-+import urllib.error
-+from wsgiref.simple_server import make_server
-+from django.core.servers.basehttp import WSGIServer, WSGIRequestHandler
+@@ -0,0 +1,48 @@
++import requests
++import threading
++import time
++import os
++import sys
++import django
++from django.conf import settings
++from django.core.servers.basehttp import run
++from django.core.wsgi import get_wsgi_application
 +
-+def app(environ, start_response):
-+    start_response('200 OK', [('Content-Type', 'text/plain')])
-+    return [b"Hello World\n"]
++settings.configure(
++    DEBUG=True,
++    ROOT_URLCONF=__name__,
++    SECRET_KEY='secret',
++    ALLOWED_HOSTS=['*'],
++)
++
++from django.http import HttpResponse
++
++def home(request):
++    return HttpResponse("This is the body that shouldn't be here on HEAD requests.")
++
++from django.urls import path
++urlpatterns = [
++    path('', home),
++]
++
++django.setup()
++
++def run_server():
++    app = get_wsgi_application()
++    run('127.0.0.1', 8080, app)
 +
 +if __name__ == '__main__':
-+    from threading import Thread
-+    import time
-+    server = make_server('127.0.0.1', 8000, app, server_class=WSGIServer, handler_class=WSGIRequestHandler)
-+    t = Thread(target=server.serve_forever)
-+    t.daemon = True
-+    t.start()
++    server_thread = threading.Thread(target=run_server)
++    server_thread.daemon = True
++    server_thread.start()
 +    
-+    time.sleep(1)
++    time.sleep(1) # wait for server to start
 +    
-+    import socket
-+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-+    s.connect(('127.0.0.1', 8000))
-+    s.sendall(b"HEAD / HTTP/1.0\r\n\r\n")
-+    response = s.recv(4096)
-+    print("RAW HEAD RESPONSE:\n" + response.decode('utf-8'))
++    response = requests.head('http://127.0.0.1:8080/')
++    print(f"Status Code: {response.status_code}")
++    print(f"Headers: {response.headers}")
++    print(f"Body: {repr(response.text)}")
++    print(f"Raw Body: {repr(response.content)}")
++    
++    # Let's try curl as well
++    os.system('curl -iX HEAD http://127.0.0.1:8080/')
+diff --git a/test_head2.py b/test_head2.py
+new file mode 100644
+index 0000000000..c1e619f511
+--- /dev/null
++++ b/test_head2.py
+@@ -0,0 +1,60 @@
++import requests
++import threading
++import time
++import os
++import sys
++import django
++from django.conf import settings
++from django.core.servers.basehttp import run, ServerHandler
++from django.core.wsgi import get_wsgi_application
++
++settings.configure(
++    DEBUG=True,
++    ROOT_URLCONF=__name__,
++    SECRET_KEY='secret',
++    ALLOWED_HOSTS=['*'],
++)
++
++from django.http import HttpResponse
++
++def home(request):
++    return HttpResponse("This is the body that shouldn't be here on HEAD requests.")
++
++from django.urls import path
++urlpatterns = [
++    path('', home),
++]
++
++django.setup()
++
++def finish_response(self):
++    try:
++        if not self.result_is_file() or not self.sendfile():
++            for data in self.result:
++                if self.environ.get('REQUEST_METHOD') != 'HEAD':
++                    self.write(data)
++            self.finish_content()
++    except:
++        if hasattr(self.result, 'close'):
++            self.result.close()
++        raise
++    else:
++        self.close()
++
++ServerHandler.finish_response = finish_response
++
++def run_server():
++    app = get_wsgi_application()
++    run('127.0.0.1', 8081, app)
++
++if __name__ == '__main__':
++    server_thread = threading.Thread(target=run_server)
++    server_thread.daemon = True
++    server_thread.start()
++    
++    time.sleep(1) # wait for server to start
++    
++    print("Testing HEAD:")
++    os.system('curl -iX HEAD http://127.0.0.1:8081/')
++    print("\nTesting GET:")
++    os.system('curl -i http://127.0.0.1:8081/')
+diff --git a/test_head3.py b/test_head3.py
+new file mode 100644
+index 0000000000..dea6754cf5
+--- /dev/null
++++ b/test_head3.py
+@@ -0,0 +1,67 @@
++import requests
++import threading
++import time
++import os
++import sys
++import django
++from django.conf import settings
++from django.core.servers.basehttp import run, ServerHandler
++from django.core.wsgi import get_wsgi_application
++
++settings.configure(
++    DEBUG=True,
++    ROOT_URLCONF=__name__,
++    SECRET_KEY='secret',
++    ALLOWED_HOSTS=['*'],
++    MIDDLEWARE=['django.middleware.common.CommonMiddleware'],
++)
++
++from django.http import HttpResponse
++
++def home(request):
++    return HttpResponse("This is the body that shouldn't be here on HEAD requests.")
++
++from django.urls import path
++urlpatterns = [
++    path('', home),
++]
++
++django.setup()
++
++def write(self, data):
++    """'write()' callable as specified by PEP 3333"""
++
++    assert type(data) is bytes, \
++        "write() argument must be bytestring"
++
++    if not self.status:
++        raise AssertionError("write() before start_response()")
++
++    elif not self.headers_sent:
++        # Before the first output, send the stored headers
++        self.bytes_sent = len(data)    # make sure we know content-length
++        self.send_headers()
++    else:
++        self.bytes_sent += len(data)
++
++    if self.environ.get('REQUEST_METHOD') != 'HEAD':
++        self._write(data)
++        self._flush()
++
++ServerHandler.write = write
++
++def run_server():
++    app = get_wsgi_application()
++    run('127.0.0.1', 8082, app)
++
++if __name__ == '__main__':
++    server_thread = threading.Thread(target=run_server)
++    server_thread.daemon = True
++    server_thread.start()
++    
++    time.sleep(1) # wait for server to start
++    
++    print("Testing HEAD:")
++    os.system('curl -iX HEAD http://127.0.0.1:8082/')
++    print("\nTesting GET:")
++    os.system('curl -i http://127.0.0.1:8082/')
+diff --git a/test_head4.py b/test_head4.py
+new file mode 100644
+index 0000000000..383c31af29
+--- /dev/null
++++ b/test_head4.py
+@@ -0,0 +1,9 @@
++import wsgiref.handlers
++import inspect
++import django.core.servers.basehttp
++
++print("ServerHandler bases:", django.core.servers.basehttp.ServerHandler.__bases__)
++print("\nBaseHandler.send_headers:")
++print(inspect.getsource(wsgiref.handlers.BaseHandler.send_headers))
++print("\nBaseHandler.write:")
++print(inspect.getsource(wsgiref.handlers.BaseHandler.write))
+diff --git a/test_head5.py b/test_head5.py
+new file mode 100644
+index 0000000000..1c68f7eaaa
+--- /dev/null
++++ b/test_head5.py
+@@ -0,0 +1,4 @@
++import wsgiref.handlers
++import inspect
++
++print(inspect.getsource(wsgiref.handlers.BaseHandler.sendfile))
+diff --git a/test_head_env.py b/test_head_env.py
+new file mode 100644
+index 0000000000..addba3fb1f
+--- /dev/null
++++ b/test_head_env.py
+@@ -0,0 +1,63 @@
++import requests
++import threading
++import time
++import os
++import sys
++import django
++from django.conf import settings
++from django.core.servers.basehttp import run, ServerHandler
++from django.core.wsgi import get_wsgi_application
++
++settings.configure(
++    DEBUG=True,
++    ROOT_URLCONF=__name__,
++    SECRET_KEY='secret',
++    ALLOWED_HOSTS=['*'],
++    MIDDLEWARE=['django.middleware.common.CommonMiddleware'],
++)
++
++from django.http import HttpResponse
++
++def home(request):
++    return HttpResponse("This is the body that shouldn't be here on HEAD requests.")
++
++from django.urls import path
++urlpatterns = [
++    path('', home),
++]
++
++django.setup()
++
++def write(self, data):
++    assert type(data) is bytes, "write() argument must be a bytes instance"
++    if not self.status:
++        raise AssertionError("write() before start_response()")
++    elif not self.headers_sent:
++        self.bytes_sent = len(data)
++        self.send_headers()
++    else:
++        self.bytes_sent += len(data)
++
++    if self.environ.get("REQUEST_METHOD") == "HEAD":
++        return
++        
++    self._write(data)
++    self._flush()
++
++ServerHandler.write = write
++
++def run_server():
++    app = get_wsgi_application()
++    run('127.0.0.1', 8083, app)
++
++if __name__ == '__main__':
++    server_thread = threading.Thread(target=run_server)
++    server_thread.daemon = True
++    server_thread.start()
++    
++    time.sleep(1) # wait for server to start
++    
++    print("Testing HEAD:")
++    os.system('curl -I http://127.0.0.1:8083/')
++    print("\nTesting GET:")
++    os.system('curl -i http://127.0.0.1:8083/')
+diff --git a/test_head_fix.py b/test_head_fix.py
+new file mode 100644
+index 0000000000..4e8dec69cc
+--- /dev/null
++++ b/test_head_fix.py
+@@ -0,0 +1,8 @@
++import django
++from django.core.servers.basehttp import ServerHandler
++
++def get_code():
++    import inspect
++    print(inspect.getsource(ServerHandler))
++
++get_code()
+diff --git a/test_head_flush.py b/test_head_flush.py
+new file mode 100644
+index 0000000000..31d484821e
+--- /dev/null
++++ b/test_head_flush.py
+@@ -0,0 +1,69 @@
++import requests
++import threading
++import time
++import socket
++import django
++from django.conf import settings
++from django.core.servers.basehttp import run, ServerHandler
++from django.core.wsgi import get_wsgi_application
++
++settings.configure(
++    DEBUG=True,
++    ROOT_URLCONF=__name__,
++    SECRET_KEY='secret',
++    ALLOWED_HOSTS=['*'],
++    MIDDLEWARE=['django.middleware.common.CommonMiddleware'],
++)
++
++from django.http import HttpResponse
++
++def home(request):
++    time.sleep(0.5) # ensure client has time to close connection
++    return HttpResponse("This is the body that shouldn't be here on HEAD requests. " * 1000)
++
++from django.urls import path
++urlpatterns = [
++    path('', home),
++]
++
++django.setup()
++
++def send_headers(self):
++    super(ServerHandler, self).send_headers()
++    if self.environ.get("REQUEST_METHOD") == "HEAD":
++        self._write = lambda data: None
++
++ServerHandler.send_headers = send_headers
++
++def run_server():
++    app = get_wsgi_application()
++    run('127.0.0.1', 8085, app)
++
++if __name__ == '__main__':
++    server_thread = threading.Thread(target=run_server)
++    server_thread.daemon = True
++    server_thread.start()
++    
++    time.sleep(1) # wait for server to start
++    
++    # Custom client that closes connection right after headers
++    s = socket.socket()
++    s.connect(('127.0.0.1', 8085))
++    s.sendall(b"HEAD / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
++    
++    # Read headers
++    response = b""
++    while b"\r\n\r\n" not in response:
++        chunk = s.recv(1)
++        if not chunk:
++            break
++        response += chunk
++        
++    print("Received headers:", response.decode('utf-8'))
++    
++    # Close connection before server finishes writing body
 +    s.close()
++    print("Connection closed by client.")
 +    
-+    server.shutdown()
++    # Wait to see if server crashes or logs broken pipe
++    time.sleep(2)
+diff --git a/test_head_mock.py b/test_head_mock.py
+new file mode 100644
+index 0000000000..19b307b200
+--- /dev/null
++++ b/test_head_mock.py
+@@ -0,0 +1,52 @@
++import requests
++import threading
++import time
++import os
++import sys
++import django
++from django.conf import settings
++from django.core.servers.basehttp import run, ServerHandler
++from django.core.wsgi import get_wsgi_application
++
++settings.configure(
++    DEBUG=True,
++    ROOT_URLCONF=__name__,
++    SECRET_KEY='secret',
++    ALLOWED_HOSTS=['*'],
++    MIDDLEWARE=['django.middleware.common.CommonMiddleware'],
++)
++
++from django.http import HttpResponse
++
++def home(request):
++    return HttpResponse("This is the body that shouldn't be here on HEAD requests.")
++
++from django.urls import path
++urlpatterns = [
++    path('', home),
++]
++
++django.setup()
++
++def send_headers(self):
++    super(ServerHandler, self).send_headers()
++    if self.environ.get("REQUEST_METHOD") == "HEAD":
++        self._write = lambda data: None
++
++ServerHandler.send_headers = send_headers
++
++def run_server():
++    app = get_wsgi_application()
++    run('127.0.0.1', 8084, app)
++
++if __name__ == '__main__':
++    server_thread = threading.Thread(target=run_server)
++    server_thread.daemon = True
++    server_thread.start()
++    
++    time.sleep(1) # wait for server to start
++    
++    print("Testing HEAD:")
++    os.system('curl -I http://127.0.0.1:8084/')
++    print("\nTesting GET:")
++    os.system('curl -i http://127.0.0.1:8084/')
+diff --git a/test_head_override.py b/test_head_override.py
+new file mode 100644
+index 0000000000..76c1cb0b87
+--- /dev/null
++++ b/test_head_override.py
+@@ -0,0 +1,7 @@
++import wsgiref.handlers
++import inspect
++
++class MyServerHandler(wsgiref.handlers.SimpleHandler):
++    pass
++
++print(inspect.getsource(MyServerHandler))

@@ -1,87 +1,110 @@
-diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
-index 13a6809dd8..d85916c8e1 100644
---- a/django/db/models/sql/query.py
-+++ b/django/db/models/sql/query.py
-@@ -436,6 +436,11 @@ class Query(BaseExpression):
-             )
-             or having
-         )
-+        has_existing_window = any(
-+            getattr(annotation, "contains_over_clause", False)
-+            for annotation in self.annotations.values()
-+        )
-+
-         # Decide if we need to use a subquery.
-         #
-         # Existing aggregations would cause incorrect results as
-@@ -450,6 +455,7 @@ class Query(BaseExpression):
-             isinstance(self.group_by, tuple)
-             or self.is_sliced
-             or has_existing_aggregation
-+            or has_existing_window
-             or refs_subquery
-             or qualify
-             or self.distinct
-diff --git a/patch.py b/patch.py
+diff --git a/check_subquery.py b/check_subquery.py
 new file mode 100644
-index 0000000000..1d47b338e2
+index 0000000000..9a78da7d37
 --- /dev/null
-+++ b/patch.py
++++ b/check_subquery.py
 @@ -0,0 +1,43 @@
-+import re
-+
-+with open("django/db/models/sql/query.py", "r") as f:
-+    content = f.read()
-+
-+replacement = """        has_existing_aggregation = (
-+            any(
-+                getattr(annotation, "contains_aggregate", True)
-+                for annotation in self.annotations.values()
-+            )
-+            or having
-+        )
-+        has_existing_window = any(
-+            getattr(annotation, "contains_over_clause", False)
-+            for annotation in self.annotations.values()
-+        )
-+"""
-+
-+content = content.replace("""        has_existing_aggregation = (
-+            any(
-+                getattr(annotation, "contains_aggregate", True)
-+                for annotation in self.annotations.values()
-+            )
-+            or having
-+        )""", replacement)
-+
-+replacement2 = """        if (
-+            isinstance(self.group_by, tuple)
-+            or self.is_sliced
-+            or has_existing_aggregation
-+            or has_existing_window
-+            or refs_subquery
-+"""
-+
-+content = content.replace("""        if (
-+            isinstance(self.group_by, tuple)
-+            or self.is_sliced
-+            or has_existing_aggregation
-+            or refs_subquery
-+""", replacement2)
-+
-+with open("django/db/models/sql/query.py", "w") as f:
-+    f.write(content)
-diff --git a/test_issue.py b/test_issue.py
-new file mode 100644
-index 0000000000..d9f2fbbd6a
---- /dev/null
-+++ b/test_issue.py
-@@ -0,0 +1,47 @@
 +import os
 +import django
 +from django.conf import settings
-+from django.db import models, connection
-+from django.db.models import F, Sum, Window
++from django.db import models
++from django.db.models import Sum, Count
++
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        '__main__',
++    ],
++)
++
++django.setup()
++
++class MyModel(models.Model):
++    date = models.DateField()
++    DJR = models.FloatField()
++
++from django.core.management import call_command
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(MyModel)
++
++queryset = MyModel.objects.annotate(
++    agg_djr=Sum("DJR")
++)
++
++try:
++    aggregate = queryset.aggregate(
++        total=Count("date")
++    )
++    print("Aggregate result:", aggregate)
++    print("SQL:", connection.queries[-1]['sql'])
++except Exception as e:
++    import traceback
++    traceback.print_exc()
+diff --git a/check_subquery_no_agg.py b/check_subquery_no_agg.py
+new file mode 100644
+index 0000000000..9ee7871e73
+--- /dev/null
++++ b/check_subquery_no_agg.py
+@@ -0,0 +1,41 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models import Sum, Count
++
++settings.configure(
++    DEBUG=True,
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        '__main__',
++    ],
++)
++
++django.setup()
++
++class MyModel(models.Model):
++    date = models.DateField()
++    DJR = models.FloatField()
++
++from django.core.management import call_command
++from django.db import connection
++with connection.schema_editor() as schema_editor:
++    schema_editor.create_model(MyModel)
++
++queryset = MyModel.objects.all()
++
++try:
++    aggregate = queryset.aggregate(
++        total=Count("date")
++    )
++    print("Aggregate result:", aggregate)
++    print("SQL:", connection.queries[-1]['sql'])
++except Exception as e:
++    import traceback
++    traceback.print_exc()
+diff --git a/check_window.py b/check_window.py
+new file mode 100644
+index 0000000000..41cff6426e
+--- /dev/null
++++ b/check_window.py
+@@ -0,0 +1,28 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models import Sum, F, Window
 +from django.db.models.functions import Coalesce
 +
 +settings.configure(
@@ -92,35 +115,209 @@ index 0000000000..d9f2fbbd6a
 +        }
 +    },
 +    INSTALLED_APPS=[
++        '__main__',
 +    ],
 +)
++
 +django.setup()
 +
-+class Data(models.Model):
++w = Window(Sum("DJR"), order_by=F("date").asc())
++c = Coalesce(w, 0.0)
++
++print("w.contains_aggregate:", getattr(w, "contains_aggregate", None))
++print("c.contains_aggregate:", getattr(c, "contains_aggregate", None))
++print("w.contains_over_clause:", getattr(w, "contains_over_clause", None))
++print("c.contains_over_clause:", getattr(c, "contains_over_clause", None))
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index 13a6809dd8..790998be05 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -436,6 +436,10 @@ class Query(BaseExpression):
+             )
+             or having
+         )
++        has_existing_window = any(
++            getattr(annotation, "contains_over_clause", False)
++            for annotation in self.annotations.values()
++        )
+         # Decide if we need to use a subquery.
+         #
+         # Existing aggregations would cause incorrect results as
+@@ -450,6 +454,7 @@ class Query(BaseExpression):
+             isinstance(self.group_by, tuple)
+             or self.is_sliced
+             or has_existing_aggregation
++            or has_existing_window
+             or refs_subquery
+             or qualify
+             or self.distinct
+diff --git a/my_edit_tool.py b/my_edit_tool.py
+new file mode 100644
+index 0000000000..ef0b299a37
+--- /dev/null
++++ b/my_edit_tool.py
+@@ -0,0 +1,26 @@
++import sys
++
++def main():
++    if len(sys.argv) < 4:
++        print("Usage: python my_edit_tool.py <file_path> <search_string> <replace_string>")
++        return
++    file_path = sys.argv[1]
++    search_string = sys.argv[2]
++    replace_string = sys.argv[3]
++    
++    with open(file_path, 'r') as f:
++        content = f.read()
++        
++    if search_string not in content:
++        print("Search string not found in file.")
++        return
++        
++    content = content.replace(search_string, replace_string)
++    
++    with open(file_path, 'w') as f:
++        f.write(content)
++        
++    print("File edited successfully.")
++
++if __name__ == "__main__":
++    main()
+diff --git a/patch_query.py b/patch_query.py
+new file mode 100644
+index 0000000000..9ab80a603e
+--- /dev/null
++++ b/patch_query.py
+@@ -0,0 +1,42 @@
++with open('django/db/models/sql/query.py', 'r') as f:
++    content = f.read()
++
++search = """        has_existing_aggregation = (
++            any(
++                getattr(annotation, "contains_aggregate", True)
++                for annotation in self.annotations.values()
++            )
++            or having
++        )"""
++
++replace = """        has_existing_aggregation = (
++            any(
++                getattr(annotation, "contains_aggregate", True)
++                for annotation in self.annotations.values()
++            )
++            or having
++        )
++        has_existing_window = any(
++            getattr(annotation, "contains_over_clause", False)
++            for annotation in self.annotations.values()
++        )"""
++
++if search in content:
++    content = content.replace(search, replace)
++    
++search2 = """        if (
++            isinstance(self.group_by, tuple)
++            or self.is_sliced
++            or has_existing_aggregation"""
++
++replace2 = """        if (
++            isinstance(self.group_by, tuple)
++            or self.is_sliced
++            or has_existing_aggregation
++            or has_existing_window"""
++
++if search2 in content:
++    content = content.replace(search2, replace2)
++
++with open('django/db/models/sql/query.py', 'w') as f:
++    f.write(content)
+diff --git a/read_query.py b/read_query.py
+new file mode 100644
+index 0000000000..ef1a77b921
+--- /dev/null
++++ b/read_query.py
+@@ -0,0 +1,12 @@
++import sys
++with open('django/db/models/sql/query.py', 'r') as f:
++    lines = f.readlines()
++
++for i, line in enumerate(lines):
++    if 'def get_aggregation' in line:
++        start = i
++        break
++
++for i in range(start, start + 150):
++    if i < len(lines):
++        print(f"{i+1:04d}: {lines[i].rstrip()}")
+diff --git a/reproduce.py b/reproduce.py
+new file mode 100644
+index 0000000000..3cf8469115
+--- /dev/null
++++ b/reproduce.py
+@@ -0,0 +1,66 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from django.db.models import Sum, F, Window
++from django.db.models.functions import Coalesce
++
++settings.configure(
++    DATABASES={
++        'default': {
++            'ENGINE': 'django.db.backends.sqlite3',
++            'NAME': ':memory:',
++        }
++    },
++    INSTALLED_APPS=[
++        '__main__',
++    ],
++)
++
++django.setup()
++
++class MyModel(models.Model):
 +    date = models.DateField()
 +    DJR = models.FloatField()
 +
-+    class Meta:
-+        app_label = 'testapp'
-+
++# Create table
++from django.core.management import call_command
++from django.db import connection
 +with connection.schema_editor() as schema_editor:
-+    schema_editor.create_model(Data)
++    schema_editor.create_model(MyModel)
 +
-+Data.objects.create(date='2023-01-01', DJR=10)
-+Data.objects.create(date='2023-01-02', DJR=20)
-+Data.objects.create(date='2023-01-03', DJR=30)
++MyModel.objects.create(date='2021-01-01', DJR=1.0)
++MyModel.objects.create(date='2021-01-02', DJR=2.0)
 +
-+queryset = Data.objects.all().annotate(
++queryset = MyModel.objects.annotate(
 +    cumul_DJR=Coalesce(Window(Sum("DJR"), order_by=F("date").asc()), 0.0)
 +)
++
++print(queryset.query)
++
 +try:
 +    aggregate = queryset.aggregate(
 +        DJR_total=Sum("DJR"),
 +        cumul_DJR_total=Sum("cumul_DJR")
 +    )
 +    print("Aggregate result:", aggregate)
-+    print("Test passed!")
++    print("SUCCESS")
 +except Exception as e:
 +    import traceback
 +    traceback.print_exc()
-+    print("Test failed!")
++    print("FAILED")
++
++queryset = MyModel.objects.annotate(
++    cumul_DJR=Coalesce(Window(Sum("DJR"), order_by=F("date").asc()), 0.0)
++)
++print("Testing when window function is NOT referenced:")
++try:
++    aggregate = queryset.aggregate(
++        DJR_total=Sum("DJR"),
++    )
++    print("Aggregate result:", aggregate)
++    print("SUCCESS")
++except Exception as e:
++    import traceback
++    traceback.print_exc()
++    print("FAILED")

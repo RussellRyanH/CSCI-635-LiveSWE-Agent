@@ -1,0 +1,341 @@
+diff --git a/TASK_DESCRIPTION_PATH b/TASK_DESCRIPTION_PATH
+new file mode 100644
+index 0000000000..73b158cefe
+--- /dev/null
++++ b/TASK_DESCRIPTION_PATH
+@@ -0,0 +1,10 @@
++Upgrading 2.2>3.0 causes named tuples used as arguments to __range to error.
++Description
++	
++I noticed this while upgrading a project from 2.2 to 3.0.
++This project passes named 2-tuples as arguments to range queryset filters. This works fine on 2.2. On 3.0 it causes the following error: TypeError: __new__() missing 1 required positional argument: 'far'.
++This happens because django.db.models.sql.query.Query.resolve_lookup_value goes into the tuple elements to resolve lookups and then attempts to reconstitute the tuple with the resolved elements.
++When it attempts to construct the new tuple it preserves the type (the named tuple) but it passes a iterator to it's constructor.
++NamedTuples don't have the code path for copying an iterator, and so it errors on insufficient arguments.
++The fix is to * expand the contents of the iterator into the constructor.
++
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index 4648daf395..25c3e410de 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -1077,6 +1077,11 @@ class Query(BaseExpression):
+         elif isinstance(value, (list, tuple)):
+             # The items of the iterable may be expressions and therefore need
+             # to be resolved independently.
++            if hasattr(value, '_make'):
++                return type(value)(*(
++                    self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
++                    for sub_value in value
++                ))
+             return type(value)(
+                 self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
+                 for sub_value in value
+diff --git a/patch.py b/patch.py
+new file mode 100644
+index 0000000000..60760d990d
+--- /dev/null
++++ b/patch.py
+@@ -0,0 +1,28 @@
++import re
++
++with open("django/db/models/sql/query.py", "r") as f:
++    content = f.read()
++
++replacement = """        elif isinstance(value, (list, tuple)):
++            # The items of the iterable may be expressions and therefore need
++            # to be resolved independently.
++            resolved_values = (
++                self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
++                for sub_value in value
++            )
++            if hasattr(value, '_make'):
++                return type(value)._make(resolved_values)
++            return type(value)(resolved_values)"""
++
++old_code = """        elif isinstance(value, (list, tuple)):
++            # The items of the iterable may be expressions and therefore need
++            # to be resolved independently.
++            return type(value)(
++                self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
++                for sub_value in value
++            )"""
++
++content = content.replace(old_code, replacement)
++
++with open("django/db/models/sql/query.py", "w") as f:
++    f.write(content)
+diff --git a/patch2.py b/patch2.py
+new file mode 100644
+index 0000000000..7f74af447a
+--- /dev/null
++++ b/patch2.py
+@@ -0,0 +1,33 @@
++import re
++
++with open("django/db/models/sql/query.py", "r") as f:
++    content = f.read()
++
++replacement = """        elif isinstance(value, (list, tuple)):
++            # The items of the iterable may be expressions and therefore need
++            # to be resolved independently.
++            if hasattr(value, '_make'):
++                return type(value)(*(
++                    self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
++                    for sub_value in value
++                ))
++            return type(value)(
++                self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
++                for sub_value in value
++            )"""
++
++old_code = """        elif isinstance(value, (list, tuple)):
++            # The items of the iterable may be expressions and therefore need
++            # to be resolved independently.
++            resolved_values = (
++                self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
++                for sub_value in value
++            )
++            if hasattr(value, '_make'):
++                return type(value)._make(resolved_values)
++            return type(value)(resolved_values)"""
++
++content = content.replace(old_code, replacement)
++
++with open("django/db/models/sql/query.py", "w") as f:
++    f.write(content)
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..ba706bf20c
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,4 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Also note, at any step, you may choose to update your reflection prompt by editing reflection_prompt.txt instead of executing a bash command. 
++
+diff --git a/test_all_queries.py b/test_all_queries.py
+new file mode 100644
+index 0000000000..99687bb9b5
+--- /dev/null
++++ b/test_all_queries.py
+@@ -0,0 +1,13 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++
++# Configure Django settings
++if not settings.configured:
++    settings.configure(
++        DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}},
++        INSTALLED_APPS=['__main__'],
++    )
++django.setup()
++
+diff --git a/test_consumption.py b/test_consumption.py
+new file mode 100644
+index 0000000000..50b7ec616d
+--- /dev/null
++++ b/test_consumption.py
+@@ -0,0 +1,18 @@
++class Point(tuple):
++    def __new__(cls, x, y):
++        return super().__new__(cls, (x, y))
++
++def gen():
++    print("gen called 1")
++    yield 1
++    print("gen called 2")
++    yield 2
++
++g = gen()
++try:
++    Point(g)
++except TypeError:
++    print("Caught TypeError")
++
++print("Now trying to unpack:")
++print(Point(*g))
+diff --git a/test_django_query.py b/test_django_query.py
+new file mode 100644
+index 0000000000..94ec5074b0
+--- /dev/null
++++ b/test_django_query.py
+@@ -0,0 +1,28 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from collections import namedtuple
++
++# Configure Django settings
++settings.configure(
++    DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}},
++    INSTALLED_APPS=['__main__'],
++)
++django.setup()
++
++class MyModel(models.Model):
++    value = models.IntegerField()
++
++MyTuple = namedtuple('MyTuple', ['near', 'far'])
++
++# Create tables
++django.core.management.call_command('migrate', verbosity=0, interactive=False)
++
++# Try to query with named tuple
++try:
++    qs = MyModel.objects.filter(value__range=MyTuple(1, 10))
++    print("Success! Query:", qs.query)
++except Exception as e:
++    print("Exception:", type(e).__name__, e)
++
+diff --git a/test_fallback.py b/test_fallback.py
+new file mode 100644
+index 0000000000..bfb04ac4ad
+--- /dev/null
++++ b/test_fallback.py
+@@ -0,0 +1,15 @@
++from collections import namedtuple
++
++MyTuple = namedtuple('MyTuple', ['near', 'far'])
++
++def make_gen():
++    yield 1
++    yield 2
++
++gen = make_gen()
++try:
++    MyTuple(gen)
++except TypeError as e:
++    print("Caught TypeError:", e)
++    print("Trying * expansion:", MyTuple(*gen))
++
+diff --git a/test_list_tuple.py b/test_list_tuple.py
+new file mode 100644
+index 0000000000..d4bd9da9f1
+--- /dev/null
++++ b/test_list_tuple.py
+@@ -0,0 +1,19 @@
++try:
++    print(list(*(1, 2)))
++except Exception as e:
++    print("list:", type(e).__name__, e)
++
++try:
++    print(tuple(*(1, 2)))
++except Exception as e:
++    print("tuple:", type(e).__name__, e)
++
++val = (1, 2)
++print("type(val)(x for x in val):", type(val)(x for x in val))
++
++from collections import namedtuple
++MyTuple = namedtuple('MyTuple', ['near', 'far'])
++val = MyTuple(1, 2)
++
++has_fields = hasattr(val, '_make')
++print("hasattr _make:", has_fields)
+diff --git a/test_list_tuple_unpack.py b/test_list_tuple_unpack.py
+new file mode 100644
+index 0000000000..3d3f3de827
+--- /dev/null
++++ b/test_list_tuple_unpack.py
+@@ -0,0 +1,18 @@
++from collections import namedtuple
++MyTuple = namedtuple('MyTuple', ['near', 'far'])
++
++for val in ([1, 2], (1, 2), MyTuple(1, 2)):
++    if hasattr(val, '_make'):
++        print(type(val).__name__, "has _make")
++    else:
++        print(type(val).__name__, "no _make")
++
++    try:
++        if hasattr(val, '_make'):
++            res = type(val)._make(x for x in val)
++        else:
++            res = type(val)(x for x in val)
++        print("Success for", type(val).__name__, res)
++    except Exception as e:
++        print("Failed for", type(val).__name__, type(e).__name__)
++
+diff --git a/test_make.py b/test_make.py
+new file mode 100644
+index 0000000000..affad3d24d
+--- /dev/null
++++ b/test_make.py
+@@ -0,0 +1,10 @@
++from collections import namedtuple
++MyTuple = namedtuple('MyTuple', ['near', 'far'])
++val = MyTuple(1, 2)
++
++resolved_values = (x * 2 for x in val)
++
++if hasattr(val, '_make'):
++    new_val = type(val)._make(resolved_values)
++    print("Using _make:", new_val)
++
+diff --git a/test_make_or_catch.py b/test_make_or_catch.py
+new file mode 100644
+index 0000000000..fb585181b5
+--- /dev/null
++++ b/test_make_or_catch.py
+@@ -0,0 +1,11 @@
++from collections import namedtuple
++import typing
++
++NT1 = namedtuple('NT1', 'a b')
++class NT2(typing.NamedTuple):
++    a: int
++    b: int
++
++for cls in [NT1, NT2]:
++    val = cls(1, 2)
++    print(cls.__name__, hasattr(val, '_make'), hasattr(val, '_fields'))
+diff --git a/test_namedtuple.py b/test_namedtuple.py
+new file mode 100644
+index 0000000000..0ec66d38e3
+--- /dev/null
++++ b/test_namedtuple.py
+@@ -0,0 +1,17 @@
++from collections import namedtuple
++MyTuple = namedtuple('MyTuple', ['near', 'far'])
++val = MyTuple(1, 2)
++
++print("type(val):", type(val))
++
++try:
++    result = type(val)(x for x in val)
++    print("Success:", result)
++except Exception as e:
++    print("Exception:", type(e).__name__, e)
++
++try:
++    result = type(val)(*(x for x in val))
++    print("With star expansion:", result)
++except Exception as e:
++    print("Exception with star expansion:", type(e).__name__, e)
+diff --git a/test_subclass.py b/test_subclass.py
+new file mode 100644
+index 0000000000..36d34127da
+--- /dev/null
++++ b/test_subclass.py
+@@ -0,0 +1,17 @@
++class MyTuple(tuple):
++    pass
++
++val = MyTuple((1, 2))
++try:
++    print(type(val)(*(x for x in val)))
++except Exception as e:
++    print("MyTuple star expansion failed:", type(e).__name__, e)
++
++class MyList(list):
++    pass
++
++val2 = MyList([1, 2])
++try:
++    print(type(val2)(*(x for x in val2)))
++except Exception as e:
++    print("MyList star expansion failed:", type(e).__name__, e)
