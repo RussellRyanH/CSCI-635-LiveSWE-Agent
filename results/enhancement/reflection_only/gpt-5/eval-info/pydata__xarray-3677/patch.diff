@@ -1,0 +1,256 @@
+diff --git a/TASK_DESCRIPTION_PATH b/TASK_DESCRIPTION_PATH
+new file mode 100644
+index 00000000..c34af70a
+--- /dev/null
++++ b/TASK_DESCRIPTION_PATH
+@@ -0,0 +1,41 @@
++Merging dataArray into dataset using dataset method fails
++While it's possible to merge a dataset and a dataarray object using the top-level merge() function, if you try the same thing with the ds.merge() method it fails.
++
++python
++import xarray as xr
++
++ds = xr.Dataset({'a': 0})
++da = xr.DataArray(1, name='b')
++
++expected = xr.merge([ds, da])  # works fine
++print(expected)
++
++ds.merge(da)  # fails
++
++
++Output:
++
++<xarray.Dataset>
++Dimensions:  ()
++Data variables:
++    a        int64 0
++    b        int64 1
++
++Traceback (most recent call last):
++  File mwe.py, line 6, in <module>
++    actual = ds.merge(da)
++  File /home/tegn500/Documents/Work/Code/xarray/xarray/core/dataset.py, line 3591, in merge
++    fill_value=fill_value,
++  File /home/tegn500/Documents/Work/Code/xarray/xarray/core/merge.py, line 835, in dataset_merge_method
++    objs, compat, join, priority_arg=priority_arg, fill_value=fill_value
++  File /home/tegn500/Documents/Work/Code/xarray/xarray/core/merge.py, line 548, in merge_core
++    coerced = coerce_pandas_values(objects)
++  File /home/tegn500/Documents/Work/Code/xarray/xarray/core/merge.py, line 394, in coerce_pandas_values
++    for k, v in obj.items():
++  File /home/tegn500/Documents/Work/Code/xarray/xarray/core/common.py, line 233, in __getattr__
++    {!r} object has no attribute {!r}.format(type(self).__name__, name)
++AttributeError: 'DataArray' object has no attribute 'items'
++
++
++
++
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 00000000..2d838a48
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,22 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++
++[Added guidance - Editing and Verification Workflow]
++- Always start by writing a minimal reproduction script for the bug. Use it to validate the fix quickly.
++- Prefer delegating Dataset.method behavior to the top-level function when applicable to ensure consistency.
++- Use tools/edit_file.py for precise, auditable edits. Example:
++  python tools/edit_file.py <<'JSON'
++  {
++    "filename": "path/to/file.py",
++    "ops": [
++      {"op":"ensure_contains","pattern":"anchor text"},
++      {"op":"insert_after","anchor":"anchor text","content":"\n# inserted line\n"},
++      {"op":"replace","search":"old","replace":"new","count":1}
++    ]
++  }
++  JSON
++- After each change, re-run the reproduction script and check for regressions.
++- Do not modify tests or configuration files; only change non-test source files.
++- If an approach needs deviation from normal flow (e.g., creating helper tools), append that plan here before proceeding.
+diff --git a/tools/edit_file.py b/tools/edit_file.py
+new file mode 100644
+index 00000000..bfcdccc2
+--- /dev/null
++++ b/tools/edit_file.py
+@@ -0,0 +1,157 @@
++#!/usr/bin/env python3
++import sys, json, re, os
++
++def load_json_from_stdin():
++    data = sys.stdin.read()
++    if not data.strip():
++        print("ERROR: No JSON input provided on stdin.", file=sys.stderr)
++        sys.exit(2)
++    try:
++        return json.loads(data)
++    except json.JSONDecodeError as e:
++        print(f"ERROR: Failed to parse JSON: {e}", file=sys.stderr)
++        sys.exit(2)
++
++def read_file(path):
++    try:
++        with open(path, "r", encoding="utf-8") as f:
++            return f.read()
++    except FileNotFoundError:
++        print(f"ERROR: File not found: {path}", file=sys.stderr)
++        sys.exit(2)
++
++def write_file(path, content):
++    with open(path, "w", encoding="utf-8") as f:
++        f.write(content)
++
++def ensure_contains(text, pattern, regex=False):
++    if regex:
++        return re.search(pattern, text) is not None
++    return pattern in text
++
++def do_replace(text, op):
++    regex = op.get("regex", False)
++    count = op.get("count", -1)
++    search = op["search"]
++    replace = op.get("replace", "")
++    if regex:
++        flags = 0
++        if op.get("flags"):
++            for fl in op["flags"]:
++                if hasattr(re, fl):
++                    flags |= getattr(re, fl)
++        new_text, n = re.subn(search, replace, text, 0 if count in (-1, 0) else count, flags=flags)
++        if n == 0 and op.get("require_match", True):
++            print(f"ERROR: Regex pattern not found for replace: {search}", file=sys.stderr)
++            sys.exit(3)
++        return new_text, n
++    else:
++        if search not in text and op.get("require_match", True):
++            print(f"ERROR: Search string not found for replace: {search}", file=sys.stderr)
++            sys.exit(3)
++        n = text.count(search) if count in (-1, 0) else min(count, text.count(search))
++        return text.replace(search, replace, 0 if count in (-1,0) else count), n
++
++def do_insert_after(text, op):
++    regex = op.get("regex", False)
++    anchor = op["anchor"]
++    content = op.get("content", "")
++    if regex:
++        m = re.search(anchor, text)
++        if not m:
++            print(f"ERROR: Anchor regex not found for insert_after: {anchor}", file=sys.stderr)
++            sys.exit(3)
++        idx = m.end()
++        return text[:idx] + content + text[idx:], 1
++    else:
++        idx = text.find(anchor)
++        if idx == -1:
++            print(f"ERROR: Anchor not found for insert_after: {anchor}", file=sys.stderr)
++            sys.exit(3)
++        idx += len(anchor)
++        return text[:idx] + content + text[idx:], 1
++
++def do_insert_before(text, op):
++    regex = op.get("regex", False)
++    anchor = op["anchor"]
++    content = op.get("content", "")
++    if regex:
++        m = re.search(anchor, text)
++        if not m:
++            print(f"ERROR: Anchor regex not found for insert_before: {anchor}", file=sys.stderr)
++            sys.exit(3)
++        idx = m.start()
++        return text[:idx] + content + text[idx:], 1
++    else:
++        idx = text.find(anchor)
++        if idx == -1:
++            print(f"ERROR: Anchor not found for insert_before: {anchor}", file=sys.stderr)
++            sys.exit(3)
++        return text[:idx] + content + text[idx:], 1
++
++def do_append(text, op):
++    content = op.get("content", "")
++    return text + content, 1
++
++def main():
++    spec = load_json_from_stdin()
++    filename = spec.get("filename")
++    ops = spec.get("ops", [])
++    if not filename or not isinstance(ops, list):
++        print("ERROR: JSON must contain 'filename' and list 'ops'.", file=sys.stderr)
++        sys.exit(2)
++    if not os.path.exists(filename):
++        print(f"ERROR: File does not exist: {filename}", file=sys.stderr)
++        sys.exit(2)
++
++    text = read_file(filename)
++    total_changes = 0
++    for i, op in enumerate(ops, 1):
++        kind = op.get("op")
++        if kind is None:
++            print(f"ERROR: Op #{i} missing 'op' field.", file=sys.stderr)
++            sys.exit(2)
++
++        if kind == "ensure_contains":
++            patt = op["pattern"]
++            regex = op.get("regex", False)
++            if not ensure_contains(text, patt, regex):
++                print(f"ERROR: ensure_contains failed for pattern: {patt}", file=sys.stderr)
++                sys.exit(3)
++            print(f"OK: ensure_contains matched for pattern: {patt}")
++            continue
++
++        if kind == "ensure_not_contains":
++            patt = op["pattern"]
++            regex = op.get("regex", False)
++            if ensure_contains(text, patt, regex):
++                print(f"ERROR: ensure_not_contains failed for pattern: {patt}", file=sys.stderr)
++                sys.exit(3)
++            print(f"OK: ensure_not_contains verified absence for pattern: {patt}")
++            continue
++
++        if kind == "replace":
++            text, n = do_replace(text, op)
++            print(f"OK: replace made {n} change(s).")
++            total_changes += n
++        elif kind == "insert_after":
++            text, n = do_insert_after(text, op)
++            print(f"OK: insert_after made {n} change(s).")
++            total_changes += n
++        elif kind == "insert_before":
++            text, n = do_insert_before(text, op)
++            print(f"OK: insert_before made {n} change(s).")
++            total_changes += n
++        elif kind == "append":
++            text, n = do_append(text, op)
++            print(f"OK: append made {n} change(s).")
++            total_changes += n
++        else:
++            print(f"ERROR: Unknown op kind: {kind}", file=sys.stderr)
++            sys.exit(2)
++
++    write_file(filename, text)
++    print(f"SUCCESS: Edited {filename}. Total changes: {total_changes}")
++
++if __name__ == "__main__":
++    main()
+diff --git a/xarray/core/merge.py b/xarray/core/merge.py
+index 10c7804d..5572fdcd 100644
+--- a/xarray/core/merge.py
++++ b/xarray/core/merge.py
+@@ -809,6 +809,13 @@ def dataset_merge_method(
+     # method due for backwards compatibility
+     # TODO: consider deprecating it?
+ 
++    from .dataarray import DataArray
++    from .dataset import Dataset
++    # Accept DataArray by converting to a Dataset for merge consistency with top-level xr.merge
++    if isinstance(other, DataArray):
++        other = other.to_dataset()
++
++
+     if isinstance(overwrite_vars, Iterable) and not isinstance(overwrite_vars, str):
+         overwrite_vars = set(overwrite_vars)
+     else:

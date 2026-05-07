@@ -1,0 +1,230 @@
+diff --git a/edit_restify_fallback.py b/edit_restify_fallback.py
+new file mode 100644
+index 000000000..082f99cd2
+--- /dev/null
++++ b/edit_restify_fallback.py
+@@ -0,0 +1,56 @@
++#!/usr/bin/env python3
++import io, sys, re, os
++
++path = os.path.join('sphinx', 'util', 'typing.py')
++src = io.open(path, 'r', encoding='utf-8').read()
++
++# We will replace the block inside _restify_py37:
++# elif hasattr(cls, '__qualname__'):
++#     if cls.__module__ == 'typing':
++#         return ':py:class:`~%s.%s`' % (cls.__module__, cls.__qualname__)
++#     else:
++#         return ':py:class:`%s.%s`' % (cls.__module__, cls.__qualname__)
++pattern = re.compile(
++    r'(\n(?P<indent>\s*)elif hasattr\(cls, \'__qualname__\'\):\n)'
++    r'(?P=indent)\s*if cls\.__module__ == \'typing\':\n'
++    r'(?P=indent)\s*    return \':py:class:`~%s\.%s`\' % '
++    r'\(cls\.__module__, cls\.__qualname__\)\n'
++    r'(?P=indent)\s*else:\n'
++    r'(?P=indent)\s*    return \':py:class:`%s\.%s`\' % '
++    r'\(cls\.__module__, cls\.__qualname__\)\n'
++)
++
++def replacement(m):
++    indent = m.group('indent')
++    lines = [
++        "",
++        f"{indent}elif hasattr(cls, '__qualname__'):",
++        f"{indent}    name = getattr(cls, '__qualname__', None) or getattr(cls, '__name__', None)",
++        f"{indent}    if not name:",
++        f"{indent}        display = getattr(cls, '__display_name__', '')",
++        f"{indent}        if isinstance(display, str) and display:",
++        f"{indent}            name = display.rsplit('.', 1)[-1]",
++        f"{indent}    if not name:",
++        f"{indent}        return repr(cls)",
++        f"{indent}    if cls.__module__ == 'typing':",
++        f"{indent}        return ':py:class:`~%s.%s`' % (cls.__module__, name)",
++        f"{indent}    else:",
++        f"{indent}        return ':py:class:`%s.%s`' % (cls.__module__, name)",
++        ""
++    ]
++    return "\n".join(lines)
++
++new_src, n = pattern.subn(replacement, src, count=1)
++if n == 0:
++    print("ERROR: Target block not found to patch in sphinx/util/typing.py", file=sys.stderr)
++    sys.exit(1)
++
++io.open(path, 'w', encoding='utf-8').write(new_src)
++print(f"Patched {path}: replaced qualname block with robust fallback (occurrences: {n})")
++PY && python edit_restify_fallback.py && cat <<'PY' > test_restify_fallback.py
++from sphinx.util.typing import restify
++
++# Create a dynamic class with empty __qualname__ to emulate problematic mocked bases
++C = type('Foo', (object,), {'__module__': 'torch.nn', '__qualname__': ''})
++print(restify(C))  # Expect to fall back to __name__ and print :py:class:`torch.nn.Foo`
++PY && PYTHONPATH=$(pwd) python test_restify_fallback.py
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 000000000..863f000fa
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,13 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task, if you have learned any additional information about the task that should be added to the task description, or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Note that the task description can be changed by modifying the task_description.txt file directly. Anytime you execute commands that provide insight into the issue you are solving, you MUST add these insights to the task description before proceeding!
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++
++NOTE: Investigate restify() and any name-resolution helpers it uses to ensure mocked base classes (from autodoc_mock_imports) preserve full qualified names like torch.nn.Module. Potential fix likely in util/inspect or autodoc object formatting.
++
++ACTION REMINDER: When formatting base classes, ensure restify() falls back to __name__ or __display_name__ if __qualname__ is missing/empty to avoid outputs like 'torch.nn.'.
++
++WORKFLOW NOTE: When editing core utilities, create a targeted patch script and a minimal repro to validate behavior changes before running the full test suite to avoid timeouts.
++
++WORKFLOW NOTE: When fixing core formatting (restify), implement a safe fallback when __qualname__ is empty, then validate with a minimal repro before running the full suite.
+diff --git a/sim_restify_mock.py b/sim_restify_mock.py
+new file mode 100644
+index 000000000..567408639
+--- /dev/null
++++ b/sim_restify_mock.py
+@@ -0,0 +1,15 @@
++from sphinx.ext.autodoc.mock import mock
++from sphinx.util.typing import restify
++import importlib
++
++def main():
++    with mock(['torch']):
++        torch = importlib.import_module('torch')
++        class MyBase(torch.nn.Module):
++            pass
++        base = MyBase.__bases__[0]
++        print("BASE ATTRS:", {"module": getattr(base, "__module__", None), "qualname": getattr(base, "__qualname__", None), "name": getattr(base, "__name__", None)})
++        print("RESTIFY:", restify(base))
++
++if __name__ == "__main__":
++    main()
+diff --git a/sphinx/util/typing.py b/sphinx/util/typing.py
+index 87707d48f..88abaf40f 100644
+--- a/sphinx/util/typing.py
++++ b/sphinx/util/typing.py
+@@ -192,10 +192,17 @@ def _restify_py37(cls: Optional[Type]) -> str:
+     elif isinstance(cls, typing._SpecialForm):
+         return ':py:obj:`~%s.%s`' % (cls.__module__, cls._name)
+     elif hasattr(cls, '__qualname__'):
++        name = getattr(cls, '__qualname__', None) or getattr(cls, '__name__', None)
++        if not name:
++            display = getattr(cls, '__display_name__', '')
++            if isinstance(display, str) and display:
++                name = display.rsplit('.', 1)[-1]
++        if not name:
++            return repr(cls)
+         if cls.__module__ == 'typing':
+-            return ':py:class:`~%s.%s`' % (cls.__module__, cls.__qualname__)
++            return ':py:class:`~%s.%s`' % (cls.__module__, name)
+         else:
+-            return ':py:class:`%s.%s`' % (cls.__module__, cls.__qualname__)
++            return ':py:class:`%s.%s`' % (cls.__module__, name)
+     elif isinstance(cls, ForwardRef):
+         return ':py:class:`%s`' % cls.__forward_arg__
+     else:
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 000000000..06210538f
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,98 @@
++Inherited classes not correctly documented when mocked
++### Describe the bug
++
++We're experiencing an issue when documenting classes that inherit mocked classes. However, classes which inherit other classes from our own package are ok.
++
++This issue appears to be dependent on the sphinx version:
++
++- sphinx<3.0: Everything is OK. 
++- sphinx>=3.0 < 3.4.2: Classes that inherit mocked classes are not documented. (see [sphinx #8164](https://github.com/sphinx-doc/sphinx/issues/8164)). This is fixed in sphinx 3.4.2. 
++- sphinx>=3.4.2: The previously missing classes are now documented, but there is a problem with the Bases section in the docs. 
++ 
++Example: In the docs for alibi_detect.utils.pytorch.kernels.DeepKernel in this readthedocs build https://seldon--338.org.readthedocs.build/projects/alibi-detect/en/338/api/alibi_detect.utils.pytorch.kernels.html, the base class is listed as Bases: torch.nn. instead of Bases: torch.nn.Module. 
++
++
++### How to Reproduce
++
++
++$ git clone https://github.com/ascillitoe/alibi-detect.git
++$ cd alibi-detect
++$ pip install -r requirements/docs.txt
++$ make build_docs
++$ # open doc/_build/html/api/alibi_detect.utils.pytorch.kernels.html and see Bases section.
++
++
++
++### Expected behavior
++
++The Bases section should report torch.nn.Module not torch.nn.. 
++
++i.e. see
++https://seldon--325.org.readthedocs.build/projects/alibi-detect/en/325/api/alibi_detect.utils.pytorch.kernels.html
++
++### Your project
++
++https://github.com/ascillitoe/alibi-detect/tree/feature_sphinx4
++
++### Screenshots
++
++### Screenshot with sphinx==4.2
++![sphinx_problem](https://user-images.githubusercontent.com/32061685/133816582-ca162b07-41c7-4b8e-98ea-781e7c659229.png)
++
++### Screenshot with sphinx<3.0
++![sphinx_working](https://user-images.githubusercontent.com/32061685/133816065-6291ce1b-96cf-4b0f-9648-7f993fc15611.png)
++
++
++
++### OS
++
++Ubuntu 18.04 (used by readthedocs/build:6.0)
++
++### Python version
++
++3.8.11
++
++### Sphinx version
++
++>=3.4.2
++
++### Sphinx extensions
++
++    [sphinx.ext.autodoc,
++    sphinx.ext.doctest,
++    sphinx.ext.intersphinx,
++    sphinx.ext.todo,
++    sphinx.ext.coverage,
++    sphinx.ext.mathjax,
++    sphinx.ext.ifconfig,
++    sphinx.ext.viewcode,
++    sphinx.ext.napoleon,
++    sphinx_autodoc_typehints,
++    sphinxcontrib.apidoc, 
++    nbsphinx,
++    nbsphinx_link,  
++    myst_parser]
++
++
++### Extra tools
++
++_No response_
++
++### Additional context
++
++demo PR:
++https://github.com/SeldonIO/alibi-detect/pull/338
++
++readthedocs demo build:
++https://seldon--338.org.readthedocs.build/projects/alibi-detect/en/338/api/alibi_detect.utils.pytorch.kernels.html
++
++
++
++
++INSIGHT: The 'Bases' section is generated by ClassDocumenter.add_directive_header (sphinx/ext/autodoc/__init__.py) using restify() on base classes. With mocked bases, restify() appears to truncate the class name (e.g., 'torch.nn.' instead of 'torch.nn.Module'). We should inspect restify() and how it formats mocked objects.
++
++INSIGHT: The 'Bases' list uses sphinx.util.typing.restify() on base classes. If a mocked base has an empty __qualname__, restify previously emitted ':py:class:'. Fix by falling back to __name__ or __display_name__ when __qualname__ is empty.
++
++INSIGHT: Simulating with Sphinx's autodoc mock showed restify outputs ':py:class:' as expected. The observed 'torch.nn.' likely occurs when a mocked base has an empty __qualname__. We will patch restify() to fall back to __name__ or __display_name__ when __qualname__ is empty.
++
++INSIGHT: The 'Bases' list uses sphinx.util.typing.restify() on base classes. If a mocked base has an empty __qualname__, restify can emit a truncated reference like ':py:class:`torch.nn.`'. We'll add a fallback to __name__ or __display_name__.

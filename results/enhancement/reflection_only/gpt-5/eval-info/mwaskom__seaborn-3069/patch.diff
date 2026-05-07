@@ -1,0 +1,234 @@
+diff --git a/TASK_DESCRIPTION_PATH b/TASK_DESCRIPTION_PATH
+new file mode 100644
+index 00000000..a32d47d9
+--- /dev/null
++++ b/TASK_DESCRIPTION_PATH
+@@ -0,0 +1,15 @@
++Nominal scale should be drawn the same way as categorical scales
++Three distinctive things happen on the categorical axis in seaborn's categorical plots:
++
++1. The scale is drawn to +/- 0.5 from the first and last tick, rather than using the normal margin logic
++2. A grid is not shown, even when it otherwise would be with the active style
++3. If on the y axis, the axis is inverted
++
++It probably makes sense to have so.Nominal scales (including inferred ones) do this too. Some comments on implementation:
++
++1. This is actually trickier than you'd think; I may have posted an issue over in matplotlib about this at one point, or just discussed on their gitter. I believe the suggested approach is to add an invisible artist with sticky edges and set the margin to 0. Feels like a hack! I might have looked into setting the sticky edges _on the spine artist_ at one point?
++
++2. Probably straightforward to do in Plotter._finalize_figure. Always a good idea? How do we defer to the theme if the user wants to force a grid? Should the grid be something that is set in the scale object itself
++
++3. Probably straightforward to implement but I am not exactly sure where would be best.
++
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 00000000..c072a517
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,18 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++
++[Additional guidance - seaborn PR: Nominal scale categorical axis behavior]
++- Before coding, locate components:
++  - Search for Plotter._finalize_figure, scale classes (Nominal), and axis/grid logic.
++  - Identify where inferred Nominal scales are configured.
++- Implement categorical-like behavior for Nominal scales:
++  1) Axis limits extend to +/- 0.5 beyond first/last tick (override normal margins; consider sticky edges or setting margins=0 with invisible artist).
++  2) Disable gridlines by default for Nominal axes, but respect explicit user/theme overrides.
++  3) Invert axis if Nominal is on y (consistent with categorical plots).
++- Add logic in scale object and/or Plotter._finalize_figure to centralize behavior.
++- Create a minimal reproduction script to visualize the changes and verify:
++  - Limits (+/-0.5), grid off by default, y-axis inversion for Nominal on y.
++- Use tools/edit.py for structured edits (regex replace, insert_before/after, replace_block) to minimize manual file rewrites.
++- After changes, run tests and examples; if failures occur, adjust to defer to user settings gracefully (only apply defaults when not explicitly set).
+diff --git a/seaborn/_core/plot.py b/seaborn/_core/plot.py
+index 4f0290a4..2da8dfb8 100644
+--- a/seaborn/_core/plot.py
++++ b/seaborn/_core/plot.py
+@@ -16,6 +16,7 @@ from typing import Any, List, Optional, cast
+ from cycler import cycler
+ import pandas as pd
+ from pandas import DataFrame, Series, Index
++import numpy as np
+ import matplotlib as mpl
+ from matplotlib.axes import Axes
+ from matplotlib.artist import Artist
+@@ -1643,6 +1644,38 @@ class Plotter:
+                     if isinstance(b, str):
+                         hi = cast(float, hi) + 0.5
+                     ax.set(**{f"{axis}lim": (lo, hi)})
++                else:
++                    # Apply categorical-like behavior for Nominal scales
++                    # - extend limits to +/- 0.5 around tick range
++                    # - disable gridlines along the nominal axis
++                    # - invert y-axis if nominal on y
++                    from seaborn._core.scales import Nominal  # local import to avoid cycles
++                    scale = self._scales.get(axis_key)
++                    is_nominal = isinstance(scale, Nominal)
++                    if is_nominal:
++                        # Determine current tick locations in data coords
++                        get_ticks = getattr(ax, f"get_{axis}ticks")
++                        ticks = [t for t in get_ticks() if np.isfinite(t)]
++                        if len(ticks) >= 1:
++                            lo, hi = min(ticks) - 0.5, max(ticks) + 0.5
++                            ax.set(**{f"{axis}lim": (lo, hi)})
++                        # Remove margins so limits are exact
++                        if axis == "x":
++                            ax.margins(x=0)
++                        else:
++                            ax.margins(y=0)
++                        # Disable gridlines along the nominal axis (respect numeric axis grid)
++                        try:
++                            ax.grid(False, axis=axis)
++                        except TypeError:
++                            # Fallback for very old Matplotlib without axis kw
++                            ax.grid(False)
++                        # Invert y if the nominal scale is on the y axis
++                        if axis == "y":
++                            try:
++                                ax.invert_yaxis()
++                            except Exception:
++                                pass
+ 
+         engine_default = None if p._target is not None else "tight"
+         layout_engine = p._layout_spec.get("engine", engine_default)
+diff --git a/tools/edit.py b/tools/edit.py
+new file mode 100755
+index 00000000..8fefacd1
+--- /dev/null
++++ b/tools/edit.py
+@@ -0,0 +1,132 @@
++#!/usr/bin/env python3
++import sys, json, re, os
++from typing import List, Dict, Any
++
++USAGE = """Usage:
++  echo '{"file": "path", "ops": [{"action":"replace", "pattern":"...", "repl":"..."}]}' | python tools/edit.py
++Actions:
++  - replace: {"action":"replace","pattern":"...","repl":"...","count":0}
++  - insert_after: {"action":"insert_after","anchor":"...","text":"...","nth":-1}
++  - insert_before: {"action":"insert_before","anchor":"...","text":"...","nth":0}
++  - delete: {"action":"delete","pattern":"...","count":0}
++  - replace_block: {"action":"replace_block","start":"...","end":"...","include_start":true,"include_end":true,"text":"..."}
++Notes:
++  - Patterns are regex with DOTALL|MULTILINE.
++  - nth: index of match to target (default -1 = last).
++"""
++
++def find_match_spans(pattern: str, content: str):
++    rx = re.compile(pattern, re.DOTALL | re.MULTILINE)
++    return list(rx.finditer(content))
++
++def apply_ops(file_path: str, ops: List[Dict[str, Any]]) -> str:
++    if not os.path.exists(file_path):
++        raise FileNotFoundError(f"File not found: {file_path}")
++    with open(file_path, "r", encoding="utf-8") as f:
++        content = f.read()
++
++    original = content
++    changes = []
++
++    for i, op in enumerate(ops):
++        action = op.get("action")
++        if action == "replace":
++            pattern = op["pattern"]
++            repl = op.get("repl", "")
++            count = int(op.get("count", 0))
++            rx = re.compile(pattern, re.DOTALL | re.MULTILINE)
++            content, n = rx.subn(repl, content, count=0 if count == 0 else count)
++            changes.append(f"[{i}] replace: {n} substitutions")
++
++        elif action == "insert_after":
++            anchor = op["anchor"]
++            text = op.get("text", "")
++            nth = int(op.get("nth", -1))
++            matches = find_match_spans(anchor, content)
++            if not matches:
++                raise ValueError(f"insert_after: anchor not found: {anchor}")
++            m = matches[nth]
++            pos = m.end()
++            content = content[:pos] + text + content[pos:]
++            changes.append(f"[{i}] insert_after at {pos} (+{len(text)} chars)")
++
++        elif action == "insert_before":
++            anchor = op["anchor"]
++            text = op.get("text", "")
++            nth = int(op.get("nth", 0))
++            matches = find_match_spans(anchor, content)
++            if not matches:
++                raise ValueError(f"insert_before: anchor not found: {anchor}")
++            m = matches[nth]
++            pos = m.start()
++            content = content[:pos] + text + content[pos:]
++            changes.append(f"[{i}] insert_before at {pos} (+{len(text)} chars)")
++
++        elif action == "delete":
++            pattern = op["pattern"]
++            count = int(op.get("count", 0))
++            rx = re.compile(pattern, re.DOTALL | re.MULTILINE)
++            content, n = rx.subn("", content, count=0 if count == 0 else count)
++            changes.append(f"[{i}] delete: {n} removals")
++
++        elif action == "replace_block":
++            start = op["start"]
++            end = op["end"]
++            include_start = bool(op.get("include_start", True))
++            include_end = bool(op.get("include_end", True))
++            text = op.get("text", "")
++            starts = find_match_spans(start, content)
++            ends = find_match_spans(end, content)
++            if not starts or not ends:
++                raise ValueError("replace_block: start or end anchor not found")
++            s = starts[0]
++            e = None
++            for cand in ends:
++                if cand.start() >= s.end():
++                    e = cand
++                    break
++            if e is None:
++                raise ValueError("replace_block: end anchor after start not found")
++            sidx = s.start() if include_start else s.end()
++            eidx = e.end() if include_end else e.start()
++            content = content[:sidx] + text + content[eidx:]
++            changes.append(f"[{i}] replace_block: [{sidx},{eidx}) -> {len(text)} chars")
++
++        else:
++            raise ValueError(f"Unknown action: {action}")
++
++    if content != original:
++        with open(file_path, "w", encoding="utf-8") as f:
++            f.write(content)
++        print(f"Edited: {file_path}", file=sys.stderr)
++        for c in changes:
++            print("  " + c, file=sys.stderr)
++    else:
++        print(f"No changes to: {file_path}", file=sys.stderr)
++    return content
++
++def main():
++    data = sys.stdin.read().strip()
++    if not data:
++        print(USAGE, file=sys.stderr)
++        sys.exit(2)
++    try:
++        spec = json.loads(data)
++    except json.JSONDecodeError as e:
++        print("Failed to parse JSON from stdin:", e, file=sys.stderr)
++        print(USAGE, file=sys.stderr)
++        sys.exit(2)
++    file_path = spec.get("file")
++    ops = spec.get("ops", [])
++    if not file_path or not ops:
++        print("Missing 'file' or 'ops' in spec.", file=sys.stderr)
++        print(USAGE, file=sys.stderr)
++        sys.exit(2)
++    try:
++        apply_ops(file_path, ops)
++    except Exception as e:
++        print(f"Error editing file: {e}", file=sys.stderr)
++        sys.exit(1)
++
++if __name__ == "__main__":
++    main()

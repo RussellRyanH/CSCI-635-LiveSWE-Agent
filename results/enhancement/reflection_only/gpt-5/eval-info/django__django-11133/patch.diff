@@ -1,0 +1,206 @@
+diff --git a/TASK_DESCRIPTION_PATH b/TASK_DESCRIPTION_PATH
+new file mode 100644
+index 0000000000..e9c9a955e0
+--- /dev/null
++++ b/TASK_DESCRIPTION_PATH
+@@ -0,0 +1,21 @@
++HttpResponse doesn't handle memoryview objects
++Description
++	
++I am trying to write a BinaryField retrieved from the database into a HttpResponse. When the database is Sqlite this works correctly, but Postgresql returns the contents of the field as a memoryview object and it seems like current Django doesn't like this combination:
++from django.http import HttpResponse																	 
++# String content
++response = HttpResponse(My Content)																			
++response.content																								 
++# Out: b'My Content'
++# This is correct
++# Bytes content
++response = HttpResponse(bMy Content)																		 
++response.content																								 
++# Out: b'My Content'
++# This is also correct
++# memoryview content
++response = HttpResponse(memoryview(bMy Content))															 
++response.content
++# Out: b'<memory at 0x7fcc47ab2648>'
++# This is not correct, I am expecting b'My Content'
++
+diff --git a/django/http/response.py b/django/http/response.py
+index 6a84e193ba..6e31f594a0 100644
+--- a/django/http/response.py
++++ b/django/http/response.py
+@@ -233,6 +233,9 @@ class HttpResponseBase:
+             return bytes(value)
+         if isinstance(value, str):
+             return bytes(value.encode(self.charset))
++        # Handle buffer-protocol types explicitly (e.g., memoryview, bytearray).
++        if isinstance(value, (memoryview, bytearray)):
++            return bytes(value)
+         # Handle non-string types.
+         return str(value).encode(self.charset)
+ 
+@@ -309,7 +312,7 @@ class HttpResponse(HttpResponseBase):
+     @content.setter
+     def content(self, value):
+         # Consume iterators upon assignment to allow repeated iteration.
+-        if hasattr(value, '__iter__') and not isinstance(value, (bytes, str)):
++        if hasattr(value, '__iter__') and not isinstance(value, (bytes, str, bytearray, memoryview)):
+             content = b''.join(self.make_bytes(chunk) for chunk in value)
+             if hasattr(value, 'close'):
+                 try:
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..d38e28e319
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,14 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++
++[Appended on this iteration]
++- Locate where HttpResponse normalizes content (django/http/response.py), especially __init__, content property/setter, and write/iterable normalization.
++- Reproduce the bug: HttpResponse(memoryview(b"X")).content should be b"X".
++- Implement buffer-protocol handling: if content supports buffer protocol (e.g., memoryview, bytearray), coerce via bytes(content) before storing.
++- Ensure correct behavior for str (encode with charset), bytes (pass-through), iterables, and streaming responses.
++- Verify via a small reproduction script and run relevant tests in tests/http/response or similar.
++- Update this prompt again if edge cases around StreamingHttpResponse/FileResponse appear.
++
++- Confirm StreamingHttpResponse handles memoryview chunks via make_bytes.
+diff --git a/tools/edit_file.py b/tools/edit_file.py
+new file mode 100755
+index 0000000000..9eca930afb
+--- /dev/null
++++ b/tools/edit_file.py
+@@ -0,0 +1,130 @@
++#!/usr/bin/env python3
++import argparse
++import sys
++import re
++from pathlib import Path
++
++def read_text(path):
++    try:
++        return Path(path).read_text(encoding="utf-8")
++    except Exception as e:
++        print(f"[edit_file] ERROR: failed to read {path}: {e}", file=sys.stderr)
++        sys.exit(2)
++
++def write_text(path, text):
++    try:
++        Path(path).write_text(text, encoding="utf-8", newline="")
++    except Exception as e:
++        print(f"[edit_file] ERROR: failed to write {path}: {e}", file=sys.stderr)
++        sys.exit(2)
++
++def replace_literal(s, old, new, count=None):
++    if count is None or count <= 0:
++        return s.replace(old, new), s.count(old)
++    out = []
++    n = 0
++    start = 0
++    while True:
++        j = s.find(old, start)
++        if j == -1:
++            out.append(s[start:])
++            break
++        out.append(s[start:j])
++        if n < count:
++            out.append(new)
++            n += 1
++        else:
++            out.append(old)
++        start = j + len(old)
++    return "".join(out), n
++
++def replace_regex(s, pattern, repl, count=0, flags=0):
++    try:
++        compiled = re.compile(pattern, flags)
++    except re.error as e:
++        print(f"[edit_file] ERROR: invalid regex '{pattern}': {e}", file=sys.stderr)
++        sys.exit(2)
++    new_s, n = compiled.subn(repl, s, count=count)
++    return new_s, n
++
++def insert_after(s, needle, text, occurrence=1):
++    lines = s.splitlines(keepends=True)
++    found = 0
++    for idx, line in enumerate(lines):
++        if needle in line:
++            found += 1
++            if found == occurrence:
++                insert_idx = idx + 1
++                lines.insert(insert_idx, text if text.endswith(("\\n", "\\r", "\\r\\n")) else text + "\\n")
++                return "".join(lines), 1
++    return s, 0
++
++def main():
++    p = argparse.ArgumentParser(description="Lightweight file editing tool for deterministic code changes.")
++    p.add_argument("path", help="Path to the file to edit")
++    sub = p.add_subparsers(dest="cmd", required=True)
++
++    rp = sub.add_parser("replace-literal", help="Replace literal text")
++    rp.add_argument("old")
++    rp.add_argument("new")
++    rp.add_argument("--count", type=int, default=0)
++
++    rr = sub.add_parser("replace-regex", help="Replace using regex")
++    rr.add_argument("pattern")
++    rr.add_argument("repl")
++    rr.add_argument("--count", type=int, default=0)
++    rr.add_argument("--flags", default="", help="Regex flags, e.g., IGNORECASE|MULTILINE")
++
++    ia = sub.add_parser("insert-after", help="Insert text after the first/ith occurrence of a line containing needle")
++    ia.add_argument("needle")
++    ia.add_argument("text")
++    ia.add_argument("--occurrence", type=int, default=1)
++
++    ap = sub.add_parser("append", help="Append text at end of file")
++    ap.add_argument("text")
++
++    pp = sub.add_parser("prepend", help="Prepend text at start of file")
++    pp.add_argument("text")
++
++    args = p.parse_args()
++    path = args.path
++    original = read_text(path)
++
++    if args.cmd == "replace-literal":
++        new_text, n = replace_literal(original, args.old, args.new, None if args.count == 0 else args.count)
++    elif args.cmd == "replace-regex":
++        flags = 0
++        if args.flags:
++            for name in args.flags.split("|"):
++                name = name.strip()
++                if not name:
++                    continue
++                if not hasattr(re, name):
++                    print(f"[edit_file] ERROR: Unknown regex flag {name}", file=sys.stderr)
++                    sys.exit(2)
++                flags |= getattr(re, name)
++        new_text, n = replace_regex(original, args.pattern, args.repl, count=args.count, flags=flags)
++    elif args.cmd == "insert-after":
++        new_text, n = insert_after(original, args.needle, args.text, args.occurrence)
++    elif args.cmd == "append":
++        t = args.text if args.text.endswith(("\\n", "\\r", "\\r\\n")) else args.text + "\\n"
++        new_text = original + t
++        n = 1
++    elif args.cmd == "prepend":
++        t = args.text if args.text.endswith(("\\n", "\\r", "\\r\\n")) else args.text + "\\n"
++        new_text = t + original
++        n = 1
++    else:
++        print("[edit_file] ERROR: Unknown command", file=sys.stderr)
++        sys.exit(2)
++
++    if new_text != original:
++        write_text(path, new_text)
++        print(f"[edit_file] OK: {path} updated, changes={n}")
++        sys.exit(0)
++    else:
++        print(f"[edit_file] NOOP: {path} unchanged, changes=0")
++        sys.exit(0)
++
++if __name__ == "__main__":
++    main()

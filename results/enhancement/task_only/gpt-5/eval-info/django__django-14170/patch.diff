@@ -1,0 +1,82 @@
+diff --git a/REFLECTION_PROMPT_PATH b/REFLECTION_PROMPT_PATH
+new file mode 100644
+index 0000000000..8b13789179
+--- /dev/null
++++ b/REFLECTION_PROMPT_PATH
+@@ -0,0 +1 @@
++
+diff --git a/django/db/models/functions/datetime.py b/django/db/models/functions/datetime.py
+index 90e6f41be0..31bd6e5ed8 100644
+--- a/django/db/models/functions/datetime.py
++++ b/django/db/models/functions/datetime.py
+@@ -163,14 +163,6 @@ ExtractYear.register_lookup(YearGt)
+ ExtractYear.register_lookup(YearGte)
+ ExtractYear.register_lookup(YearLt)
+ ExtractYear.register_lookup(YearLte)
+-
+-ExtractIsoYear.register_lookup(YearExact)
+-ExtractIsoYear.register_lookup(YearGt)
+-ExtractIsoYear.register_lookup(YearGte)
+-ExtractIsoYear.register_lookup(YearLt)
+-ExtractIsoYear.register_lookup(YearLte)
+-
+-
+ class Now(Func):
+     template = 'CURRENT_TIMESTAMP'
+     output_field = DateTimeField()
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 0000000000..ad07d39228
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,50 @@
++Query optimization in YearLookup breaks filtering by __iso_year
++Description
++	 
++		(last modified by Florian Demmer)
++	 
++The optimization to use BETWEEN instead of the EXTRACT operation in ​YearLookup is also registered for the ​__iso_year lookup, which breaks the functionality provided by ​ExtractIsoYear when used via the lookup.
++This has unfortunately been broken ever since ExtractIsoYear was introduced in ​Django 2.2 via #28649 and wasn't easy to track down since ExtractIsoYear when used by itself eg. in an annotation works perfectly fine. Just when using the lookup in a filter, the optimization is used (even when explicitly using an annotation):
++# annotation works
++>>> qs = DTModel.objects.annotate(extracted=ExtractIsoYear('start_date')).only('id')
++>>> print(qs.query)
++SELECT db_functions_dtmodel.id, EXTRACT('isoyear' FROM db_functions_dtmodel.start_date) AS extracted FROM db_functions_dtmodel
++# explicit annotation used in filter does not use extracted and adds BETWEEN
++>>> print(qs.filter(extracted=2020).query)
++SELECT db_functions_dtmodel.id, EXTRACT('isoyear' FROM db_functions_dtmodel.start_date) AS extracted FROM db_functions_dtmodel WHERE db_functions_dtmodel.start_date BETWEEN 2020-01-01 AND 2020-12-31
++# implicit lookup uses BETWEEN
++>>> print(DTModel.objects.filter(start_date__iso_year=2020).only('id').query)
++SELECT db_functions_dtmodel.id FROM db_functions_dtmodel WHERE db_functions_dtmodel.start_date BETWEEN 2020-01-01 AND 2020-12-31
++This results in the wrong data being returned by filters using iso_year.
++This PR fixes the behaviour, reverts the invalid changes to the tests and extends one test to catch this problem: ​https://github.com/django/django/pull/14157
++
++
++
++Additional insights (from repo inspection):
++- This task operates on the Django codebase; source is under ./django
++- Tests are under ./tests; we will modify only non-test files in ./django as needed
++- There is no separate 'testbed' directory; work occurs in repo root
++- Next steps: find YearLookup, ExtractIsoYear, iso_year lookup registration, and any BETWEEN optimization logic.
++
++Further insights:
++- YearLookup and YearExact/YearGt/etc are defined in django/db/models/lookups.py
++- ExtractIsoYear is defined in django/db/models/functions/datetime.py and registers Year* lookups for iso_year
++- Backends mention iso_year and may drive BETWEEN optimization
++- Hypothesis: YearLookup's BETWEEN optimization is being used for iso_year via these registrations and must be avoided for iso_year
++
++Actionable insight: ExtractIsoYear registers Year* lookups (YearExact/Gt/Gte/Lt/Lte), which inherit YearLookup and apply a BETWEEN optimization. This breaks __iso_year filtering. Fix: remove these registrations so iso_year filters use backend EXTRACT('isoyear' ...) comparisons.
++
++Verification insight: Confirmed Extract sets output_field=IntegerField (so default numeric lookups apply). Confirmed Year* registrations for ExtractIsoYear are removed.
++
++Insight: Located tests referencing __iso_year (if any) to consider targeted verification.
++
++Insight: Reviewing RegisterLookupMixin will confirm that when a Transform doesn't have a specific lookup registered, it defers to standard lookups of its output_field (IntegerField), so equality/gt/gte/lt/lte work for __iso_year without YearLookup optimization.
++
++Verification run (compiled SQL):
++Annotation SQL: SELECT "db_functions_dtmodel"."id", django_date_extract('iso_year', "db_functions_dtmodel"."start_date") AS "extracted" FROM "db_functions_dtmodel"
++Filter using explicit annotation: SELECT "db_functions_dtmodel"."id", django_date_extract('iso_year', "db_functions_dtmodel"."start_date") AS "extracted" FROM "db_functions_dtmodel" WHERE django_date_extract('iso_year', "db_functions_dtmodel"."start_date") = 2020
++Filter using __iso_year lookup: SELECT "db_functions_dtmodel"."id" FROM "db_functions_dtmodel" WHERE django_date_extract('iso_year', "db_functions_dtmodel"."start_date") = 2020
++BETWEEN present in annotation? False
++BETWEEN present in filter w/ explicit annotation? False
++BETWEEN present in __iso_year filter? False
++Conclusion: __iso_year comparisons now compile to EXTRACT-based comparisons (no BETWEEN present), aligning with the intended fix.

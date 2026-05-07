@@ -1,0 +1,309 @@
+diff --git a/TASK_DESCRIPTION_PATH b/TASK_DESCRIPTION_PATH
+new file mode 100644
+index 0000000000..b8d4107577
+--- /dev/null
++++ b/TASK_DESCRIPTION_PATH
+@@ -0,0 +1,13 @@
++BaseForm's _clean_fields() and changed_data should access values via BoundField
++Description
++	 
++		(last modified by Chris Jerdonek)
++	 
++While working on #32917, I noticed that ​BaseForm._clean_fields() and ​BaseForm.changed_data don't currently access their values through a BoundField object. It would be better for consistency if they did, and to reduce the number of code paths.
++One consequence of the current code is that form._clean_fields() can return a different value from form[name].initial when they should be the same. This case is almost, but not quite, covered by ​test_datetime_clean_initial_callable_disabled() (the test can be adjusted to cover this case).
++As part of this ticket and in line with accessing data through the BoundField objects, I noticed that the code would also be simpler if the per-field logic of changed_data() were moved into a method of the BoundField class. It could be called something like bf.did_change(). This would be more appropriate because whether form data changed for a field is a property of its BoundField (as it depends on the underlying form data), as opposed to the unbound field. With this change, the method could change from its current ~20 lines to something like this--
++@cached_property
++def changed_data(self):
++	return [name for name, bf in self._bound_items() if bf._did_change()]
++A similar change could be made to BaseForm._clean_fields().
++
+diff --git a/django/forms/boundfield.py b/django/forms/boundfield.py
+index 88adadb37d..c074413bc3 100644
+--- a/django/forms/boundfield.py
++++ b/django/forms/boundfield.py
+@@ -228,6 +228,27 @@ class BoundField:
+             attrs['disabled'] = True
+         return attrs
+ 
++
++
++
++
++    def _did_change(self):
++        """Return True if data differs from initial for this field."""
++        field = self.field
++        if not field.show_hidden_initial:
++            initial_value = self.initial
++        else:
++            hidden_widget = field.hidden_widget()
++            try:
++                initial_value = field.to_python(
++                    self.form._widget_data_value(hidden_widget, self.html_initial_name)
++                )
++            except Exception:
++                # Always assume data has changed if validation fails.
++                return True
++        data_value = self.form._field_data_value(field, self.html_name)
++        return field.has_changed(initial_value, data_value)
++
+     @property
+     def widget_type(self):
+         return re.sub(r'widget$|input$', '', self.field.widget.__class__.__name__.lower())
+diff --git a/django/forms/forms.py b/django/forms/forms.py
+index d14037bfe9..c0ab795831 100644
+--- a/django/forms/forms.py
++++ b/django/forms/forms.py
+@@ -388,10 +388,11 @@ class BaseForm:
+ 
+     def _clean_fields(self):
+         for name, field in self.fields.items():
++            bf = self[name]
+             if field.disabled:
+                 value = self.get_initial_for_field(field, name)
+             else:
+-                value = self._field_data_value(field, self.add_prefix(name))
++                value = bf.data
+             try:
+                 if isinstance(field, FileField):
+                     initial = self.get_initial_for_field(field, name)
+@@ -434,30 +435,16 @@ class BaseForm:
+         """Return True if data differs from initial."""
+         return bool(self.changed_data)
+ 
++    def _bound_items(self):
++        for name in self.fields:
++            yield name, self[name]
+     @cached_property
+     def changed_data(self):
+         data = []
+-        for name, field in self.fields.items():
+-            data_value = self._field_data_value(field, self.add_prefix(name))
+-            if not field.show_hidden_initial:
+-                # Use the BoundField's initial as this is the value passed to
+-                # the widget.
+-                initial_value = self[name].initial
+-            else:
+-                initial_prefixed_name = self.add_initial_prefix(name)
+-                hidden_widget = field.hidden_widget()
+-                try:
+-                    initial_value = field.to_python(
+-                        self._widget_data_value(hidden_widget, initial_prefixed_name)
+-                    )
+-                except ValidationError:
+-                    # Always assume data has changed if validation fails.
+-                    data.append(name)
+-                    continue
+-            if field.has_changed(initial_value, data_value):
++        for name, bf in self._bound_items():
++            if bf._did_change():
+                 data.append(name)
+         return data
+-
+     @property
+     def media(self):
+         """Return all media required to render the widgets on this form."""
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..2812406b3e
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,24 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++- When implementing form changes:
++  - Prefer accessing values via BoundField, especially in BaseForm._clean_fields() and BaseForm.changed_data.
++  - Consider moving per-field changed_data logic into BoundField (e.g., a _did_change() helper) and refactor changed_data to use self._bound_items().
++  - Ensure consistency between form._clean_fields() and form[name].initial values.
++- Workflow reminders:
++  - Grep for BaseForm and BoundField definitions before editing to understand current code paths.
++  - Make small, incremental changes and verify behavior by running a small subset of tests related to forms/fields.
++  - Avoid modifying tests; only change source code to satisfy PR goals.
++  - Use tools/edit_file.py to make precise and repeatable changes; use tools/print_context.py to inspect code around patterns.
++  - After edits, run targeted tests (e.g., -k "form and changed_data") to validate.
++- When implementing form changes:
++  - Prefer accessing values via BoundField, especially in BaseForm._clean_fields() and BaseForm.changed_data.
++  - Move per-field changed_data logic into BoundField (e.g., a _did_change() helper) and refactor changed_data to use self._bound_items().
++  - Ensure consistency between form._clean_fields() return values and form[name].initial for disabled/initial callable cases.
++- Workflow reminders:
++  - Grep for BaseForm and BoundField definitions before editing to understand current code paths.
++  - Make small, incremental changes and verify behavior by running a small subset of tests related to forms/fields.
++  - Avoid modifying tests; only change source code to satisfy PR goals.
++  - Use tools/edit_file.py to make precise and repeatable changes; use tools/print_context.py to inspect code around patterns.
++  - After edits, run targeted tests (e.g., -k "form and changed_data") to validate.
+diff --git a/tools/edit_file.py b/tools/edit_file.py
+new file mode 100755
+index 0000000000..7af86c7989
+--- /dev/null
++++ b/tools/edit_file.py
+@@ -0,0 +1,118 @@
++#!/usr/bin/env python3
++import argparse
++import re
++import sys
++from pathlib import Path
++
++def replace_literal(text, old, new, count=0):
++    return text.replace(old, new, count if count else -1)
++
++def replace_regex(text, pattern, repl, count=0, multiline=False, ignorecase=False, dotall=False):
++    flags = 0
++    if multiline:
++        flags |= re.MULTILINE
++    if ignorecase:
++        flags |= re.IGNORECASE
++    if dotall:
++        flags |= re.DOTALL
++    return re.sub(pattern, repl, text, count=0 if count is None or count == 0 else count, flags=flags)
++
++def insert_at_occurrences(text, pattern, insert_text, before=True, all_matches=False, flags=0):
++    out = []
++    last = 0
++    n_inserts = 0
++    for m in re.finditer(pattern, text, flags):
++        start, end = m.span()
++        if before:
++            out.append(text[last:start])
++            out.append(insert_text)
++            out.append(text[start:end])
++        else:
++            out.append(text[last:end])
++            out.append(insert_text)
++        last = end
++        n_inserts += 1
++        if not all_matches:
++            break
++    if n_inserts == 0:
++        return text, 0
++    out.append(text[last:])
++    return "".join(out), n_inserts
++
++def main():
++    ap = argparse.ArgumentParser(description="Edit a file with literal/regex replacements and insertions.")
++    ap.add_argument("file", help="Path to file to edit")
++    ap.add_argument("--dry-run", action="store_true", help="Do not write changes back; print to stdout")
++    ap.add_argument("--print-summary", action="store_true", help="Print a short summary of changes to stderr")
++    sub = ap.add_subparsers(dest="cmd", required=True)
++
++    sp = sub.add_parser("replace-literal", help="Literal string replacement")
++    sp.add_argument("old")
++    sp.add_argument("new")
++    sp.add_argument("--count", type=int, default=0, help="Max number of replacements (0 = all)")
++
++    sp = sub.add_parser("replace-regex", help="Regex replacement")
++    sp.add_argument("pattern")
++    sp.add_argument("repl")
++    sp.add_argument("--count", type=int, default=0, help="Max number of replacements (0 = all)")
++    sp.add_argument("--multiline", action="store_true")
++    sp.add_argument("--ignorecase", action="store_true")
++    sp.add_argument("--dotall", action="store_true")
++
++    sp = sub.add_parser("insert-after", help="Insert text after regex match")
++    sp.add_argument("pattern")
++    sp.add_argument("text")
++    sp.add_argument("--all", action="store_true", help="Insert after all matches (default: first only)")
++    sp.add_argument("--multiline", action="store_true")
++    sp.add_argument("--ignorecase", action="store_true")
++
++    sp = sub.add_parser("insert-before", help="Insert text before regex match")
++    sp.add_argument("pattern")
++    sp.add_argument("text")
++    sp.add_argument("--all", action="store_true", help="Insert before all matches (default: first only)")
++    sp.add_argument("--multiline", action="store_true")
++    sp.add_argument("--ignorecase", action="store_true")
++
++    args = ap.parse_args()
++    p = Path(args.file)
++    if not p.exists():
++        print(f"error: file not found: {p}", file=sys.stderr)
++        sys.exit(2)
++    original = p.read_text(encoding="utf-8")
++
++    updated = original
++    summary = ""
++
++    if args.cmd == "replace-literal":
++        updated = replace_literal(updated, args.old, args.new, args.count)
++        summary = "replace-literal"
++    elif args.cmd == "replace-regex":
++        updated = replace_regex(updated, args.pattern, args.repl, args.count, args.multiline, args.ignorecase, args.dotall)
++        summary = "replace-regex"
++    elif args.cmd in ("insert-after", "insert-before"):
++        flags = 0
++        if args.multiline:
++            flags |= re.MULTILINE
++        if args.ignorecase:
++            flags |= re.IGNORECASE
++        before = args.cmd == "insert-before"
++        updated, n = insert_at_occurrences(updated, args.pattern, args.text, before=before, all_matches=args.all, flags=flags)
++        summary = f"{args.cmd} (insertions={n})"
++    else:
++        print("error: unrecognized command", file=sys.stderr)
++        sys.exit(2)
++
++    if args.print-summary:
++        print(f"edit_file.py: {summary}", file=sys.stderr)
++
++    if args.dry_run:
++        sys.stdout.write(updated)
++    else:
++        if updated != original:
++            p.write_text(updated, encoding="utf-8")
++        else:
++            if args.print-summary:
++                print("No changes made (content identical).", file=sys.stderr)
++
++if __name__ == "__main__":
++    main()
+diff --git a/tools/print_context.py b/tools/print_context.py
+new file mode 100755
+index 0000000000..a3ec9e9a20
+--- /dev/null
++++ b/tools/print_context.py
+@@ -0,0 +1,45 @@
++#!/usr/bin/env python3
++import argparse
++import re
++import sys
++from pathlib import Path
++
++def main():
++    ap = argparse.ArgumentParser(description="Print lines around regex matches for context.")
++    ap.add_argument("file")
++    ap.add_argument("pattern")
++    ap.add_argument("-n", "--context", type=int, default=2, help="Lines of context before/after")
++    ap.add_argument("-i", "--ignorecase", action="store_true")
++    args = ap.parse_args()
++
++    p = Path(args.file)
++    if not p.exists():
++        print(f"error: file not found: {p}", file=sys.stderr)
++        sys.exit(2)
++
++    lines = p.read_text(encoding="utf-8").splitlines()
++    flags = re.IGNORECASE if args.ignorecase else 0
++    matches = []
++    for idx, line in enumerate(lines):
++        if re.search(args.pattern, line, flags):
++            matches.append(idx)
++
++    if not matches:
++        print("No matches found.", file=sys.stderr)
++        sys.exit(1)
++
++    seen = set()
++    for m in matches:
++        start = max(0, m - args.context)
++        end = min(len(lines), m + args.context + 1)
++        key = (start, end)
++        if key in seen:
++            continue
++        seen.add(key)
++        print(f"--- Context {start+1}:{end} ---")
++        for i in range(start, end):
++            print(f"{i+1:6d}: {lines[i]}")
++    sys.exit(0)
++
++if __name__ == "__main__":
++    main()

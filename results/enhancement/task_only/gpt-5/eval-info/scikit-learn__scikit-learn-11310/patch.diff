@@ -1,0 +1,88 @@
+diff --git a/REFLECTION_PROMPT_PATH b/REFLECTION_PROMPT_PATH
+new file mode 100644
+index 000000000..8b1378917
+--- /dev/null
++++ b/REFLECTION_PROMPT_PATH
+@@ -0,0 +1 @@
++
+diff --git a/sklearn/model_selection/_search.py b/sklearn/model_selection/_search.py
+index 99d6096af..3a9af1954 100644
+--- a/sklearn/model_selection/_search.py
++++ b/sklearn/model_selection/_search.py
+@@ -19,6 +19,7 @@ from itertools import product
+ import operator
+ import warnings
+ 
++import time
+ import numpy as np
+ from scipy.stats import rankdata
+ 
+@@ -754,6 +755,10 @@ class BaseSearchCV(six.with_metaclass(ABCMeta, BaseEstimator,
+                         # warn on key access
+                         results.add_warning(key, message, FutureWarning)
+ 
++        # For multi-metric evaluation, store the best_index_, best_params_ and
++        # best_score_ iff refit is one of the scorer names
++        # In single metric evaluation, refit_metric is "score"
++
+         # For multi-metric evaluation, store the best_index_, best_params_ and
+         # best_score_ iff refit is one of the scorer names
+         # In single metric evaluation, refit_metric is "score"
+@@ -766,10 +771,14 @@ class BaseSearchCV(six.with_metaclass(ABCMeta, BaseEstimator,
+         if self.refit:
+             self.best_estimator_ = clone(base_estimator).set_params(
+                 **self.best_params_)
++            start_time = time.time()
+             if y is not None:
+                 self.best_estimator_.fit(X, y, **fit_params)
+             else:
+                 self.best_estimator_.fit(X, **fit_params)
++            self.refit_time_ = time.time() - start_time
++
++        # Store the only scorer not as a dict for single metric evaluation
+ 
+         # Store the only scorer not as a dict for single metric evaluation
+         self.scorer_ = scorers if self.multimetric_ else scorers['score']
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 000000000..dbc43379c
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,37 @@
++Retrieving time to refit the estimator in BaseSearchCV
++Basically, I'm trying to figure out how much time it takes to refit the best model on the full data after doing grid/random search. What I can so far do is retrieve the time it takes to fit and score each model:
++
++import sklearn.datasets
++import sklearn.model_selection
++import sklearn.ensemble
++
++X, y = sklearn.datasets.load_iris(return_X_y=True)
++
++rs = sklearn.model_selection.GridSearchCV(
++    estimator=sklearn.ensemble.RandomForestClassifier(),
++    param_grid={'n_estimators': [2, 3, 4, 5]}
++)
++rs.fit(X, y)
++print(rs.cv_results_['mean_fit_time'])
++print(rs.cv_results_['mean_score_time'])
++
++In case I run this on a single core, I could time the whole search procedure and subtract the time it took to fit the single folds during hyperparameter optimization. Nevertheless, this isn't possible any more when setting n_jobs != 1.
++
++Thus, it would be great to have an attribute refit_time_ which is simply the time it took to refit the best model.
++
++Usecase: for [OpenML.org](https://openml.org) we want to support uploading the results of hyperparameter optimization, including the time it takes to do the hyperparameter optimization.
++
++
++Additional implementation notes:
++- Located BaseSearchCV implementation at sklearn/model_selection/_search.py; refitting occurs around the 'if self.refit:' block (approx lines 766-773).
++- Implemented a new attribute refit_time_ measuring wall-clock seconds spent refitting the best_estimator_ on the full dataset, using time.time() around the refit fit call. This attribute is set only when refit=True.
++- Added 'import time' to the module to support timing.
++
++Verification and fixes:
++- Verified with a local run (PYTHONPATH=.) using sklearn.model_selection.GridSearchCV and sklearn.dummy.DummyClassifier on iris:
++  - When refit=True, attribute refit_time_ is present and holds a positive float (wall-clock seconds).
++  - When refit=False, attribute refit_time_ is not present.
++- Initial automated insertion caused an IndentationError near the refit block; corrected by reconstructing the block so that:
++  - best_index_, best_params_, best_score_ remain under the "if self.refit or not self.multimetric_" block.
++  - The "if self.refit:" refit section (with timing) is at the top indentation level and sets self.refit_time_ after fitting.
++- Timing implemented via time.time() around the refit fit call.

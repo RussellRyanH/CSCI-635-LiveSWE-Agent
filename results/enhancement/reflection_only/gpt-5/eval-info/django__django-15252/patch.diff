@@ -1,0 +1,292 @@
+diff --git a/TASK_DESCRIPTION_PATH b/TASK_DESCRIPTION_PATH
+new file mode 100644
+index 0000000000..d5e1a2dd0f
+--- /dev/null
++++ b/TASK_DESCRIPTION_PATH
+@@ -0,0 +1,17 @@
++MigrationRecorder does not obey db_router allow_migrate rules
++Description
++	
++Hi,
++We have a multi-db setup. We have one connection that is for the django project, and several connections that talk to other dbs for information (ie models with managed = False). Django should only create tables in the first connection, never in any of the other connections. We have a simple router that does the following: 
++class Router(object):
++	def allow_migrate(self, db, model):
++		if db == 'default':
++			return True
++		return False
++Current Behaviour
++We run our functional tests and the migrate command is called against each connection when the test databases are created (see django/test/runner.py, setup_databases, line 300-ish, which calls django/db/backends/creation.py, create_test_db, line 377-ish)
++When this migrate runs, it tries to apply our migrations, which tries to record that a migration has been applied (see django/db/migrations/executor.py, apply_migration, which has several calls to self.recorder.record_applied). 
++The first thing that record_applied does is a call to self.ensure_schema() (see django/db/migrations/recorder.py, record_applied, lien 66-ish). 
++ensure_schema checks to see if the Migration model is in the tables in the connection. If it does not find the table then it tries to create the table. 
++I believe that this is incorrect behaviour when a db_router has been provided. If using the router above, my expectation would be that the table is not created on any connection other than the 'default' connection. Looking at the other methods on the MigrationRecorder, I would expect that there will be similar issues with applied_migrations and record_unapplied.
++
+diff --git a/django/db/migrations/recorder.py b/django/db/migrations/recorder.py
+index 1a37c6b7d0..2405272640 100644
+--- a/django/db/migrations/recorder.py
++++ b/django/db/migrations/recorder.py
+@@ -1,5 +1,5 @@
+ from django.apps.registry import Apps
+-from django.db import DatabaseError, models
++from django.db import DatabaseError, models, router
+ from django.utils.functional import classproperty
+ from django.utils.timezone import now
+ 
+@@ -46,6 +46,10 @@ class MigrationRecorder:
+     def __init__(self, connection):
+         self.connection = connection
+ 
++    def router_allows_migrate(self):
++        """Return True if router allows migrations for the migration model on this DB."""
++        return router.allow_migrate_model(self.connection.alias, self.Migration)
++
+     @property
+     def migration_qs(self):
+         return self.Migration.objects.using(self.connection.alias)
+@@ -58,6 +62,8 @@ class MigrationRecorder:
+ 
+     def ensure_schema(self):
+         """Ensure the table exists and has the correct schema."""
++        if not self.router_allows_migrate():
++            return
+         # If the table's there, that's fine - we've never changed its schema
+         # in the codebase.
+         if self.has_table():
+@@ -80,17 +86,30 @@ class MigrationRecorder:
+             # If the django_migrations table doesn't exist, then no migrations
+             # are applied.
+             return {}
+-
++        if self.has_table():
++            return {(migration.app, migration.name): migration for migration in self.migration_qs}
++        else:
++            # If the django_migrations table doesn't exist, then no migrations
++            # are applied.
++            return {}
+     def record_applied(self, app, name):
+         """Record that a migration was applied."""
++        # Respect router in ensure_schema(): don't create table if disallowed.
+         self.ensure_schema()
++        if not self.has_table():
++            return
+         self.migration_qs.create(app=app, name=name)
+-
+     def record_unapplied(self, app, name):
+         """Record that a migration was unapplied."""
+         self.ensure_schema()
++        if not self.has_table():
++            return
+         self.migration_qs.filter(app=app, name=name).delete()
+-
+     def flush(self):
+         """Delete all migration records. Useful for testing migrations."""
++        if not self.has_table():
++            return
++        self.migration_qs.all().delete()
++        if not self.has_table():
++            return
+         self.migration_qs.all().delete()
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..404b299104
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,15 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++
++--- Added notes (MigrationRecorder/router task) ---
++- Confirm the router API signature in this repo version (allow_migrate args may vary across Django versions).
++- Inspect django/db/migrations/recorder.py and ensure:
++  - ensure_schema() respects router allow_migrate and does not create the migrations table on disallowed DBs.
++  - applied_migrations(), record_applied(), and record_unapplied() all respect router allow_migrate, performing no-ops when disallowed.
++- Ensure executor code paths (e.g., apply_migration) remain consistent with the new guarded behavior.
++- Consider test DB setup across multiple connections; do not create migration tables on non-default DBs when router disallows.
++- Maintain backward compatibility by guarding behavior with router checks instead of altering global behavior.
++- After implementing, run targeted tests that involve multi-db and unmanaged models to confirm no table creation on non-default DBs.
++- Search for any assumptions about MigrationRecorder always creating/reading tables and adjust carefully.
+diff --git a/tools/edit.py b/tools/edit.py
+new file mode 100755
+index 0000000000..9b448f91b2
+--- /dev/null
++++ b/tools/edit.py
+@@ -0,0 +1,177 @@
++#!/usr/bin/env python3
++import sys
++import re
++from typing import Tuple
++
++HELP = """edit.py - simple file edit helper
++
++Usage:
++  edit.py re_sub <file> <pattern> <repl> [flags]
++      flags: combination of i (IGNORECASE), m (MULTILINE), s (DOTALL)
++  edit.py insert_after <file> <anchor> <text>
++  edit.py insert_before <file> <anchor> <text>
++  edit.py add_import <file> <import_line>
++  edit.py ensure_contains <file> <text>
++  edit.py find <file> <pattern> [flags]
++  edit.py show <file> [start_line] [end_line]
++
++All operations are non-interactive and will overwrite the file in-place.
++Exit code 0 on success, 1 on failure.
++"""
++
++def load(path: str) -> str:
++    with open(path, 'r', encoding='utf-8') as f:
++        return f.read()
++
++def save(path: str, content: str):
++    with open(path, 'w', encoding='utf-8') as f:
++        f.write(content)
++
++def re_flags_from(s: str) -> int:
++    flags = 0
++    if not s:
++        return flags
++    for ch in s:
++        if ch == 'i':
++            flags |= re.IGNORECASE
++        elif ch == 'm':
++            flags |= re.MULTILINE
++        elif ch == 's':
++            flags |= re.DOTALL
++        else:
++            print(f"Unknown flag: {ch}", file=sys.stderr)
++            sys.exit(1)
++    return flags
++
++def cmd_re_sub(args):
++    if len(args) < 3:
++        print("re_sub requires <file> <pattern> <repl> [flags]", file=sys.stderr)
++        sys.exit(1)
++    path, pat, repl = args[0], args[1], args[2]
++    flags = re_flags_from(args[3] if len(args) > 3 else "")
++    text = load(path)
++    new = re.sub(pat, repl, text, flags=flags)
++    if new == text:
++        print("No changes made by re_sub (pattern not found or same result).", file=sys.stderr)
++    save(path, new)
++    print(f"re_sub: updated {path}", file=sys.stderr)
++
++def insert_relative(text: str, anchor: str, insert_text: str, before: bool) -> Tuple[str, bool]:
++    idx = text.find(anchor)
++    if idx == -1:
++        return text, False
++    insert_at = idx if before else idx + len(anchor)
++    new = text[:insert_at] + insert_text + text[insert_at:]
++    return new, True
++
++def cmd_insert_after(args):
++    if len(args) < 3:
++        print("insert_after requires <file> <anchor> <text>", file=sys.stderr)
++        sys.exit(1)
++    path, anchor, ins = args[0], args[1], args[2]
++    text = load(path)
++    new, ok = insert_relative(text, anchor, ins, before=False)
++    if not ok:
++        print("Anchor not found for insert_after.", file=sys.stderr)
++        sys.exit(1)
++    save(path, new)
++    print(f"insert_after: updated {path}", file=sys.stderr)
++
++def cmd_insert_before(args):
++    if len(args) < 3:
++        print("insert_before requires <file> <anchor> <text>", file=sys.stderr)
++        sys.exit(1)
++    path, anchor, ins = args[0], args[1], args[2]
++    text = load(path)
++    new, ok = insert_relative(text, anchor, ins, before=True)
++    if not ok:
++        print("Anchor not found for insert_before.", file=sys.stderr)
++        sys.exit(1)
++    save(path, new)
++    print(f"insert_before: updated {path}", file=sys.stderr)
++
++def cmd_add_import(args):
++    if len(args) < 2:
++        print("add_import requires <file> <import_line>", file=sys.stderr)
++        sys.exit(1)
++    path, line = args[0], args[1]
++    text = load(path)
++    if line in text:
++        print("Import already present.", file=sys.stderr)
++        return
++    lines = text.splitlines(True)
++    insert_idx = 0
++    while insert_idx < len(lines) and (lines[insert_idx].startswith("#!") or "coding" in lines[insert_idx]):
++        insert_idx += 1
++    lines.insert(insert_idx, line + ("\n" if not line.endswith("\n") else ""))
++    save(path, "".join(lines))
++    print(f"add_import: updated {path}", file=sys.stderr)
++
++def cmd_ensure_contains(args):
++    if len(args) < 2:
++        print("ensure_contains requires <file> <text>", file=sys.stderr)
++        sys.exit(1)
++    path, text_to_ensure = args[0], args[1]
++    text = load(path)
++    if text_to_ensure in text:
++        print("Text already present.", file=sys.stderr)
++        return
++    save(path, text + ("" if text.endswith("\\n") else "\\n") + text_to_ensure + ("\\n" if not text_to_ensure.endswith("\\n") else ""))
++    print(f"ensure_contains: updated {path}", file=sys.stderr)
++
++def cmd_find(args):
++    if len(args) < 2:
++        print("find requires <file> <pattern> [flags]", file=sys.stderr)
++        sys.exit(1)
++    path, pat = args[0], args[1]
++    flags = re_flags_from(args[2] if len(args) > 2 else "")
++    text = load(path)
++    rx = re.compile(pat, flags)
++    for i, line in enumerate(text.splitlines(), start=1):
++        if rx.search(line):
++            print(f"{i:6}: {line}")
++
++def cmd_show(args):
++    if len(args) < 1:
++        print("show requires <file> [start_line] [end_line]", file=sys.stderr)
++        sys.exit(1)
++    path = args[0]
++    start = int(args[1]) if len(args) > 1 else 1
++    end = int(args[2]) if len(args) > 2 else None
++    lines = load(path).splitlines()
++    if end is None:
++        end = len(lines)
++    for i in range(max(1, start), min(len(lines), end) + 1):
++        print(f"{i:6}: {lines[i-1]}")
++
++def main():
++    if len(sys.argv) < 2 or sys.argv[1] in {"-h", "--help"}:
++        print(HELP)
++        return
++    cmd = sys.argv[1]
++    args = sys.argv[2:]
++    try:
++        if cmd == "re_sub":
++            cmd_re_sub(args)
++        elif cmd == "insert_after":
++            cmd_insert_after(args)
++        elif cmd == "insert_before":
++            cmd_insert_before(args)
++        elif cmd == "add_import":
++            cmd_add_import(args)
++        elif cmd == "ensure_contains":
++            cmd_ensure_contains(args)
++        elif cmd == "find":
++            cmd_find(args)
++        elif cmd == "show":
++            cmd_show(args)
++        else:
++            print(f"Unknown command: {cmd}", file=sys.stderr)
++            print(HELP, file=sys.stderr)
++            sys.exit(1)
++    except FileNotFoundError as e:
++        print(f"File not found: {e}", file=sys.stderr)
++        sys.exit(1)
++
++if __name__ == "__main__":
++    main()

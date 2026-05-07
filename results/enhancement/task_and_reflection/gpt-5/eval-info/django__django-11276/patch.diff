@@ -1,0 +1,177 @@
+diff --git a/django/utils/html.py b/django/utils/html.py
+index 9c519978f5..a7f09e13c4 100644
+--- a/django/utils/html.py
++++ b/django/utils/html.py
+@@ -2,6 +2,7 @@
+ 
+ import json
+ import re
++from html import escape as html_escape
+ from html.parser import HTMLParser
+ from urllib.parse import (
+     parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit,
+@@ -24,14 +25,6 @@ word_split_re = re.compile(r'''([\s<>"']+)''')
+ simple_url_re = re.compile(r'^https?://\[?\w', re.IGNORECASE)
+ simple_url_2_re = re.compile(r'^www\.|^(?!http)\w[^@]+\.(com|edu|gov|int|mil|net|org)($|/.*)$', re.IGNORECASE)
+ 
+-_html_escapes = {
+-    ord('&'): '&amp;',
+-    ord('<'): '&lt;',
+-    ord('>'): '&gt;',
+-    ord('"'): '&quot;',
+-    ord("'"): '&#39;',
+-}
+-
+ 
+ @keep_lazy(str, SafeString)
+ def escape(text):
+@@ -43,7 +36,7 @@ def escape(text):
+     This may result in double-escaping. If this is a concern, use
+     conditional_escape() instead.
+     """
+-    return mark_safe(str(text).translate(_html_escapes))
++    return mark_safe(html_escape(str(text), quote=True))
+ 
+ 
+ _js_escapes = {
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..d5165e3d6e
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,10 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task, if you have learned any additional information about the task that should be added to the task description, or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Note that the task description can be changed by modifying the task_description.txt file directly. Anytime you execute commands that provide insight into the issue you are solving, you MUST add these insights to the task description before proceeding!
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++- Plan: Replace django.utils.html.escape() with Python's html.escape(), while preserving Django's SafeString/mark_safe behavior; accept that apostrophes may become &#x27; instead of &#39;.
++- Use tools/edit_file.py for precise, scriptable edits and to show diffs.
++- Before implementing, inspect django/utils/html.py and update task_description.txt with any new insights.
++
++- Next: run focused tests (e.g., tests/template_tests/filter_tests/test_escape.py) to validate new html.escape() behavior, then broaden scope if necessary.
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 0000000000..a489331f02
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,30 @@
++Use Python stdlib html.escape() to in django.utils.html.escape()
++Description
++	
++The function django.utils.html.escape() partially duplicates the Python stdlib function html.escape(). We can replace this duplication with wider community developed version.
++html.escape() has been available since Python 3.2:
++​https://docs.python.org/3/library/html.html#html.escape
++This function is also faster than Django's. As Python bug ​https://bugs.python.org/issue18020 concludes, using .replace() can be faster than .translate(). This function gets called numerous times when rendering templates. After making the change locally, I saw the following improvement:
++master:
++$ python -m timeit -s 'from django.utils.html import escape' 'escape(copyright)'
++50000 loops, best of 5: 4.03 usec per loop
++branch:
++$ python -m timeit -s 'from django.utils.html import escape' 'escape(copyright)'
++100000 loops, best of 5: 2.45 usec per loop
++One small concern, html.escape() converts ' to &#x27 rather than &#39. These values are functionally equivalent HTML, but I'll mention it as a backwards incompatible change as the literal text has changed
++
++Additional insights:
++- Django source is under ./django; target likely django/utils/html.py implementing escape().
++- Objective: Delegate django.utils.html.escape() to Python stdlib html.escape() for performance and consistency; note change of ' to &#x27;.
++- Ensure compatibility with SafeString handling and other html utilities.
++New code insights from inspecting django/utils/html.py:
++- escape() currently uses a custom _html_escapes dict and str(text).translate(_html_escapes).
++- _html_escapes maps ord("'") to '&#39;'. Switching to Python's html.escape(..., quote=True) will change this to '&#x27;'.
++- Plan: add 'from html import escape as html_escape', remove the _html_escapes dict, and implement escape() as mark_safe(html_escape(str(text), quote=True)).
++
++New test insights:
++- Multiple tests reference django.utils.html.escape(), notably:
++  - tests/template_tests/filter_tests/test_escape.py (core behavior of escape filter)
++  - tests/admin_views/tests.py and others use escape() in expectations.
++- Potential impact area: apostrophe escaping change (&#39; -> &#x27;) may affect assertions if any compare literal outputs containing apostrophes.
++- Plan: prioritize running tests/template_tests/filter_tests/test_escape.py to validate behavior, then expand if needed.
+diff --git a/tools/edit_file.py b/tools/edit_file.py
+new file mode 100755
+index 0000000000..ce082e6a6a
+--- /dev/null
++++ b/tools/edit_file.py
+@@ -0,0 +1,83 @@
++#!/usr/bin/env python3
++import argparse, sys, re, difflib, os, io
++
++def apply_replacements(content, replacements):
++    for old, new in replacements:
++        content = content.replace(old, new)
++    return content
++
++def apply_regex(content, triplets):
++    for pat, repl, flags in triplets:
++        f = 0
++        if flags:
++            for fl in flags:
++                if fl.lower() == "i":
++                    f |= re.IGNORECASE
++                elif fl.lower() == "m":
++                    f |= re.MULTILINE
++                elif fl.lower() == "s":
++                    f |= re.DOTALL
++        content = re.sub(pat, repl, content, flags=f)
++    return content
++
++def main():
++    p = argparse.ArgumentParser(description="Lightweight file editor for scripted refactors.")
++    p.add_argument("path", help="Target file to modify")
++    g = p.add_mutually_exclusive_group(required=True)
++    g.add_argument("--write-stdin", dest="write_stdin", action="store_true", help="Overwrite file with stdin content")
++    g.add_argument("--replace", nargs=2, action="append", metavar=("OLD","NEW"), help="Literal replacement (can repeat)")
++    g.add_argument("--regex", nargs="+", metavar=("PATTERN","REPL","FLAGS"), help="Regex replacements: supply pairs or triplets; FLAGS optional (i,m,s)")
++    p.add_argument("--create", action="store_true", help="Create file if missing")
++    p.add_argument("--print-diff", action="store_true", help="Print unified diff to stdout")
++    args = p.parse_args()
++
++    path = args.path
++    if not os.path.exists(path):
++        if not args.create:
++            print(f"ERROR: File not found: {path}. Use --create to create new.", file=sys.stderr)
++            sys.exit(2)
++        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
++        with io.open(path, "w", encoding="utf-8") as f:
++            f.write("")
++
++    with io.open(path, "r", encoding="utf-8") as f:
++        original = f.read()
++
++    modified = original
++    if args.write_stdin:
++        modified = sys.stdin.read()
++    elif args.replace:
++        modified = apply_replacements(modified, args.replace)
++    elif args.regex:
++        items = list(args.regex)
++        triplets = []
++        i = 0
++        while i < len(items):
++            if i + 1 >= len(items):
++                print("ERROR: --regex expects pairs or triplets (PATTERN REPL [FLAGS])", file=sys.stderr)
++                sys.exit(2)
++            pat = items[i]; repl = items[i+1]; flags = ""
++            i += 2
++            if i < len(items):
++                nxt = items[i]
++                if re.fullmatch(r"[ims]+", nxt or ""):
++                    flags = nxt
++                    i += 1
++            triplets.append((pat, repl, flags))
++        modified = apply_regex(modified, triplets)
++
++    if modified == original:
++        if args.print_diff:
++            diff = difflib.unified_diff(original.splitlines(True), modified.splitlines(True), fromfile=path, tofile=path)
++            sys.stdout.writelines(diff)
++        sys.exit(0)
++
++    if args.print_diff:
++        diff = difflib.unified_diff(original.splitlines(True), modified.splitlines(True), fromfile=path, tofile=path)
++        sys.stdout.writelines(diff)
++
++    with io.open(path, "w", encoding="utf-8", newline="") as f:
++        f.write(modified)
++
++if __name__ == "__main__":
++    main()

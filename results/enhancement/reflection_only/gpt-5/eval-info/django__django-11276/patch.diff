@@ -1,0 +1,144 @@
+diff --git a/TASK_DESCRIPTION_PATH b/TASK_DESCRIPTION_PATH
+new file mode 100644
+index 0000000000..81db137f96
+--- /dev/null
++++ b/TASK_DESCRIPTION_PATH
+@@ -0,0 +1,15 @@
++Use Python stdlib html.escape() to in django.utils.html.escape()
++Description
++	
++The function django.utils.html.escape() partially duplicates the Python stdlib function html.escape(). We can replace this duplication with wider community developed version.
++html.escape() has been available since Python 3.2:
++​https://docs.python.org/3/library/html.html#html.escape
++This function is also faster than Django's. As Python bug ​https://bugs.python.org/issue18020 concludes, using .replace() can be faster than .translate(). This function gets called numerous times when rendering templates. After making the change locally, I saw the following improvement:
++master:
++$ python -m timeit -s 'from django.utils.html import escape' 'escape(copyright)'
++50000 loops, best of 5: 4.03 usec per loop
++branch:
++$ python -m timeit -s 'from django.utils.html import escape' 'escape(copyright)'
++100000 loops, best of 5: 2.45 usec per loop
++One small concern, html.escape() converts ' to &#x27 rather than &#39. These values are functionally equivalent HTML, but I'll mention it as a backwards incompatible change as the literal text has changed
++
+diff --git a/django/utils/html.py b/django/utils/html.py
+index 9c519978f5..f104e91b22 100644
+--- a/django/utils/html.py
++++ b/django/utils/html.py
+@@ -3,6 +3,7 @@
+ import json
+ import re
+ from html.parser import HTMLParser
++from html import escape as html_escape
+ from urllib.parse import (
+     parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit,
+ )
+@@ -23,16 +24,6 @@ unencoded_ampersands_re = re.compile(r'&(?!(\w+|#\d+);)')
+ word_split_re = re.compile(r'''([\s<>"']+)''')
+ simple_url_re = re.compile(r'^https?://\[?\w', re.IGNORECASE)
+ simple_url_2_re = re.compile(r'^www\.|^(?!http)\w[^@]+\.(com|edu|gov|int|mil|net|org)($|/.*)$', re.IGNORECASE)
+-
+-_html_escapes = {
+-    ord('&'): '&amp;',
+-    ord('<'): '&lt;',
+-    ord('>'): '&gt;',
+-    ord('"'): '&quot;',
+-    ord("'"): '&#39;',
+-}
+-
+-
+ @keep_lazy(str, SafeString)
+ def escape(text):
+     """
+@@ -43,7 +34,7 @@ def escape(text):
+     This may result in double-escaping. If this is a concern, use
+     conditional_escape() instead.
+     """
+-    return mark_safe(str(text).translate(_html_escapes))
++    return mark_safe(html_escape(str(text), quote=True))
+ 
+ 
+ _js_escapes = {
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..0aa283c9c8
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,13 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++- Before large edits, consider creating a small Python-based file edit tool to apply safe, idempotent changes (search/replace, patch hunks) with clear output and error handling.
++- Always locate and read the exact implementation being changed (e.g., django/utils/html.py escape()), and map interactions with SafeString/mark_safe/conditional_escape.
++- When replacing logic with stdlib (e.g., html.escape), verify behavioral differences (such as apostrophe escaping to &#x27 vs &#39) and ensure downstream code/tests expect the new behavior.
++- After changes, create a quick local script to benchmark or validate correctness on key examples to catch regressions early.
++- Create a small Python-based file edit tool early to apply safe, idempotent changes (search/replace, patch hunks) with clear output/errors.
++- Before edits, locate and read the exact implementation to change (e.g., django/utils/html.escape) and understand interactions with SafeString/mark_safe/conditional_escape.
++- When replacing logic with stdlib (e.g., html.escape), document and verify behavioral differences (like apostrophe &#x27 vs &#39) and ensure code/tests align.
++- After changes, write a quick local validation/benchmark script to check correctness and performance on representative inputs.
++- Prefer minimal diffs and update docstrings where behavior changes (especially escaping details).
+diff --git a/scripts/apply_stdlib_escape.py b/scripts/apply_stdlib_escape.py
+new file mode 100644
+index 0000000000..4caa7bd638
+--- /dev/null
++++ b/scripts/apply_stdlib_escape.py
+@@ -0,0 +1,60 @@
++#!/usr/bin/env python3
++import io
++import os
++import re
++import sys
++
++PATH = 'django/utils/html.py'
++
++def main():
++    if not os.path.exists(PATH):
++        print(f'Error: {PATH} not found', file=sys.stderr)
++        sys.exit(1)
++
++    with io.open(PATH, 'r', encoding='utf-8') as f:
++        src = f.read()
++
++    orig = src
++
++    # 1) Ensure import from stdlib html.escape (aliased to avoid name clash)
++    if 'from html import escape as html_escape' not in src:
++        if 'from html.parser import HTMLParser' in src:
++            src = src.replace(
++                'from html.parser import HTMLParser',
++                'from html.parser import HTMLParser\nfrom html import escape as html_escape'
++            )
++        else:
++            # Fallback: insert after the last top-level import block
++            m = re.search(r'^(?:from\s+\S+\s+import[^\n]*|import\s+\S[^\n]*)\n+', src, flags=re.M)
++            if m:
++                end = m.end()
++                src = src[:end] + 'from html import escape as html_escape\n' + src[end:]
++            else:
++                src = 'from html import escape as html_escape\n' + src
++
++    # 2) Remove the custom _html_escapes dictionary
++    src, n_removed = re.subn(
++        r'(?sm)^\s*_html_escapes\s*=\s*\{.*?\}\s*\n+',
++        '',
++        src
++    )
++
++    # 3) Update escape() implementation to delegate to html.escape
++    src, n_repl = re.subn(
++        r'return\s+mark_safe\(\s*str\(text\)\.translate\(\s*_html_escapes\s*\)\s*\)',
++        'return mark_safe(html_escape(str(text), quote=True))',
++        src
++    )
++
++    changed = src != orig
++    if changed:
++        with io.open(PATH, 'w', encoding='utf-8') as f:
++            f.write(src)
++        print(f'Patched {PATH}')
++        print(f'- Removed _html_escapes: {n_removed} occurrence(s)')
++        print(f'- Updated escape() body: {n_repl} occurrence(s)')
++    else:
++        print('No changes made; patterns not found or already patched')
++
++if __name__ == '__main__':
++    main()
