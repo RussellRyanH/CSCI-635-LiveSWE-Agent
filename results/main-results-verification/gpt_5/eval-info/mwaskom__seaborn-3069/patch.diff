@@ -1,0 +1,76 @@
+diff --git a/seaborn/_core/plot.py b/seaborn/_core/plot.py
+index 4f0290a4..4bb1b8cf 100644
+--- a/seaborn/_core/plot.py
++++ b/seaborn/_core/plot.py
+@@ -38,6 +38,27 @@ from seaborn._core.typing import (
+ )
+ from seaborn._core.rules import categorical_order
+ from seaborn._compat import set_scale_obj, set_layout_engine
++
++
++from contextlib import contextmanager
++
++@contextmanager
++def _pandas_inf_as_null_ctx(pd):
++    # Provide a best-effort context to treat inf as NA across pandas versions
++    try:
++        with _pandas_inf_as_null_ctx(pd):
++            yield
++            return
++    except Exception:
++        pass
++    try:
++        with pd.option_context("mode.use_inf_as_na", True):
++            yield
++            return
++    except Exception:
++        pass
++    # Fallback: no special option available
++    yield
+ from seaborn.rcmod import axes_style, plotting_context
+ from seaborn.palettes import color_palette
+ from seaborn.external.version import Version
+@@ -1475,7 +1496,7 @@ class Plotter:
+ 
+                 axes_df = self._filter_subplot_data(df, view)
+ 
+-                with pd.option_context("mode.use_inf_as_null", True):
++                with _pandas_inf_as_null_ctx(pd):
+                     if keep_na:
+                         # The simpler thing to do would be x.dropna().reindex(x.index).
+                         # But that doesn't work with the way that the subset iteration
+@@ -1626,6 +1647,7 @@ class Plotter:
+                 self._figure.legends.append(legend)
+ 
+     def _finalize_figure(self, p: Plot) -> None:
++        from seaborn._core.scales import Nominal
+ 
+         for sub in self._subplots:
+             ax = sub["ax"]
+@@ -1644,6 +1666,26 @@ class Plotter:
+                         hi = cast(float, hi) + 0.5
+                     ax.set(**{f"{axis}lim": (lo, hi)})
+ 
++                # Apply categorical-like behavior for Nominal scales
++                # Note: in paired plots, axis_key may be like 'x0'/'y1';
++                # fall back to the base axis key to detect the scale type.
++                base_key = axis if axis in self._scales else axis_key
++                scale_obj = self._scales.get(base_key)
++                if isinstance(scale_obj, Nominal):
++                    # Disable grid on nominal axis
++                    getattr(ax, f"{axis}axis").grid(False)
++                    # Invert y-axis when it is nominal
++                    if axis == "y":
++                        ax.invert_yaxis()
++                    # If user did not set explicit limits, set +/- 0.5 around categories
++                    if axis_key not in p._limits:
++                        n = len(getattr(ax, f"get_{axis}ticks")())
++                        if n > 0:
++                            if axis == "x":
++                                ax.set_xlim(-.5, n - .5, auto=None)
++                            else:
++                                ax.set_ylim(n - .5, -.5, auto=None)
++
+         engine_default = None if p._target is not None else "tight"
+         layout_engine = p._layout_spec.get("engine", engine_default)
+         set_layout_engine(self._figure, layout_engine)

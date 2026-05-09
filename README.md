@@ -1,15 +1,15 @@
 # CSCI-635
-This project contains all artifacts (with the exception of trajectories) generated as part of the replication study for [Live-SWE-Agent: Can Software engineering Agent self-evolve on the Fly?](https://arxiv.org/abs/2511.13646). The contents of this repo are broken down as follows:
+This project contains all artifacts generated as part of the replication study for [Live-SWE-Agent: Can Software engineering Agent self-evolve on the Fly?](https://arxiv.org/abs/2511.13646). The contents of this repo are broken down as follows:
 
 - custom_configs - Contains the custom configuration files we created to replicate the ablation study and to enable prompt evolution for the enhancement.
 
 - live-swe-agent - Contains the original source code and artifacts for live-swe-agent.
 
-- mini-swe-agent-v1 - Contains the source code for the original mini-swe-agent v1 implementation which we have modified in a few places to enable prompt evolution.
+- mini-swe-agent-v1 - Contains the modified source code for mini-swe-agent v1, which we have modified in a few places to enable prompt evolution.
 
-- results - Contains all results and related data (with the except of the trajectories) for all experiments conducted during this study.
+- results - Contains all results and related data for all experiments conducted during this study.
 
-- scripts - Contains several helpful python and shell script we created to automate some of the process for running the experiments. 
+- scripts - Contains several helpful python and shell script we created to automate some of the process for running the experiments and evaluating results. 
 
 - subsets - Contains csv files that list the instance names for the particular subset of problems from SWE-bench-verified we used in our experiments.
 

@@ -1,0 +1,96 @@
+diff --git a/django/core/management/__init__.py b/django/core/management/__init__.py
+index 5f2e64761e..ec29e54444 100644
+--- a/django/core/management/__init__.py
++++ b/django/core/management/__init__.py
+@@ -128,14 +128,43 @@ def call_command(command_name, *args, **options):
+                     yield from get_actions(sub_opt)
+             else:
+                 yield opt
++    def get_mutually_exclusive_groups(parser):
++        groups = list(getattr(parser, '_mutually_exclusive_groups', []))
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    groups.extend(get_mutually_exclusive_groups(sub_opt))
++        return groups
+ 
+     parser_actions = list(get_actions(parser))
+     # Any required arguments which are passed in via **options must be passed
+-    # to parse_args().
+-    parse_args += [
+-        '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
+-        for opt in parser_actions if opt.required and opt.dest in options
+-    ]
++    # Any required arguments, or arguments that are part of a required
++    # mutually exclusive group, which are passed in via **options must be
++    # passed to parse_args().
++    required_group_dests = set()
++    for group in get_mutually_exclusive_groups(parser):
++        if getattr(group, 'required', False):
++            for action in getattr(group, '_group_actions', []):
++                if getattr(action, 'dest', None):
++                    required_group_dests.add(action.dest)
++
++    def _format_opt_for_parse(opt, value):
++        # For flags that take no value (e.g., store_true), include the flag
++        # only when the provided value is truthy; otherwise, omit it.
++        # For options expecting a value, pass --opt=value.
++        opt_str = min(opt.option_strings)
++        # argparse actions that take no args typically have nargs == 0
++        if getattr(opt, 'nargs', None) == 0:
++            return opt_str if value else None
++        return f"{opt_str}={value}"
++
++    additions = []
++    for opt in parser_actions:
++        if opt.dest in options and (getattr(opt, 'required', False) or opt.dest in required_group_dests):
++            formatted = _format_opt_for_parse(opt, arg_options[opt.dest])
++            if formatted:
++                additions.append(formatted)
++    parse_args += additions
+     defaults = parser.parse_args(args=parse_args)
+     defaults = dict(defaults._get_kwargs(), **arg_options)
+     # Raise an error if any unknown options were passed.
+diff --git a/scripts/repro_required_group.py b/scripts/repro_required_group.py
+new file mode 100644
+index 0000000000..da1b9760db
+--- /dev/null
++++ b/scripts/repro_required_group.py
+@@ -0,0 +1,37 @@
++
++import sys
++from io import StringIO
++from django.core.management.base import BaseCommand, CommandParser
++from django.core.management import call_command, CommandError
++
++class Cmd(BaseCommand):
++    help = "Test command with required mutually exclusive group."
++
++    def create_parser(self, prog_name, subcommand):
++        parser = super().create_parser(prog_name, subcommand)
++        group = parser.add_mutually_exclusive_group(required=True)
++        group.add_argument('--shop-id', nargs='?', type=int, default=None, dest='shop_id')
++        group.add_argument('--shop', nargs='?', type=str, default=None, dest='shop_name')
++        return parser
++
++    def handle(self, *args, **options):
++        # Return a summary string
++        return f"OK: shop_id={options.get('shop_id')} shop_name={options.get('shop_name')}"
++
++cmd = Cmd()
++
++def attempt(desc, kwargs=None, argv=None):
++    try:
++        if argv is not None:
++            res = call_command(cmd, *argv)
++        else:
++            res = call_command(cmd, **(kwargs or {}))
++        print(f"{desc}: {res}")
++    except Exception as e:
++        print(f"{desc}: RAISED {type(e).__name__}: {e}")
++
++# Expect: raises (current bug) when passing via kwargs
++attempt("kwargs shop_id=1", kwargs={"shop_id": 1})
++
++# Expect: works when passing as argv
++attempt("argv --shop-id=1", argv=["--shop-id=1"])
