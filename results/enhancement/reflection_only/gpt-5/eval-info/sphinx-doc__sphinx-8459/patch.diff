@@ -1,0 +1,207 @@
+diff --git a/TASK_DESCRIPTION_PATH b/TASK_DESCRIPTION_PATH
+new file mode 100644
+index 000000000..e69de29bb
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 000000000..34966fecd
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,10 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++
++# Task reminders: Fix autodoc type alias with 'description'
++- Locate where autodoc renders type hints into the description (params/returns) and ensure alias resolution is applied.
++- Search for autodoc_type_aliases and autodoc_typehints in sphinx/ext/autodoc and sphinx/util/typing.
++- Use tools/edit.py for deterministic edits.
++- Verify with a minimal reproduction showing JSONObject alias instead of Dict[str, Any] in both signature and description.
+diff --git a/sphinx/ext/autodoc/typehints.py b/sphinx/ext/autodoc/typehints.py
+index 70cbc3ba1..3127108c9 100644
+--- a/sphinx/ext/autodoc/typehints.py
++++ b/sphinx/ext/autodoc/typehints.py
+@@ -27,7 +27,7 @@ def record_typehints(app: Sphinx, objtype: str, name: str, obj: Any,
+         if callable(obj):
+             annotations = app.env.temp_data.setdefault('annotations', {})
+             annotation = annotations.setdefault(name, OrderedDict())
+-            sig = inspect.signature(obj)
++            sig = inspect.signature(obj, type_aliases=app.config.autodoc_type_aliases)
+             for param in sig.parameters.values():
+                 if param.annotation is not param.empty:
+                     annotation[param.name] = typing.stringify(param.annotation)
+@@ -111,7 +111,7 @@ def modify_field_list(node: nodes.field_list, annotations: Dict[str, str]) -> No
+         if not arg.get('type'):
+             field = nodes.field()
+             field += nodes.field_name('', 'type ' + name)
+-            field += nodes.field_body('', nodes.paragraph('', annotation))
++            field += nodes.field_body('', nodes.paragraph('', annotations['return']))
+             node += field
+         if not arg.get('param'):
+             field = nodes.field()
+@@ -122,7 +122,7 @@ def modify_field_list(node: nodes.field_list, annotations: Dict[str, str]) -> No
+     if 'return' in annotations and 'return' not in arguments:
+         field = nodes.field()
+         field += nodes.field_name('', 'rtype')
+-        field += nodes.field_body('', nodes.paragraph('', annotation))
++        field += nodes.field_body('', nodes.paragraph('', annotations['return']))
+         node += field
+ 
+ 
+diff --git a/tmp_repro/_build/index.txt b/tmp_repro/_build/index.txt
+new file mode 100644
+index 000000000..158989d35
+--- /dev/null
++++ b/tmp_repro/_build/index.txt
+@@ -0,0 +1,15 @@
++Repro
++*****
++
++mymod.sphinx_doc(data)
++
++   Does it work.
++
++   Parameters:
++      **data** (*JSONObject*) -- Does it args.
++
++   Returns:
++      Does it work in return.
++
++   Return type:
++      JSONObject
+diff --git a/tmp_repro/_doctree/environment.pickle b/tmp_repro/_doctree/environment.pickle
+new file mode 100644
+index 000000000..a2b64e9bc
+Binary files /dev/null and b/tmp_repro/_doctree/environment.pickle differ
+diff --git a/tmp_repro/_doctree/index.doctree b/tmp_repro/_doctree/index.doctree
+new file mode 100644
+index 000000000..c328fefd4
+Binary files /dev/null and b/tmp_repro/_doctree/index.doctree differ
+diff --git a/tmp_repro/docs/conf.py b/tmp_repro/docs/conf.py
+new file mode 100644
+index 000000000..0e8f73b82
+--- /dev/null
++++ b/tmp_repro/docs/conf.py
+@@ -0,0 +1,11 @@
++
++import sys, os
++sys.path.insert(0, os.path.abspath("/testbed/tmp_repro/src"))
++extensions = ["sphinx.ext.autodoc", "sphinx.ext.napoleon"]
++autodoc_typehints = "description"
++autodoc_type_aliases = {
++    "JSONObject": "mymod.JSONObject",
++}
++master_doc = "index"
++project = "Repro"
++html_theme = "alabaster"
+diff --git a/tmp_repro/docs/index.rst b/tmp_repro/docs/index.rst
+new file mode 100644
+index 000000000..a91f00ca0
+--- /dev/null
++++ b/tmp_repro/docs/index.rst
+@@ -0,0 +1,6 @@
++
++Repro
++=====
++
++.. automodule:: mymod
++    :members:
+diff --git a/tmp_repro/src/mymod.py b/tmp_repro/src/mymod.py
+new file mode 100644
+index 000000000..4cb5a12d9
+--- /dev/null
++++ b/tmp_repro/src/mymod.py
+@@ -0,0 +1,16 @@
++
++from __future__ import annotations
++from typing import Any, Dict
++
++JSONObject = Dict[str, Any]
++
++def sphinx_doc(data: JSONObject) -> JSONObject:
++    """Does it work.
++
++    Args:
++        data: Does it args.
++
++    Returns:
++        Does it work in return.
++    """
++    return {}
+diff --git a/tools/edit.py b/tools/edit.py
+new file mode 100755
+index 000000000..dfd7e6f2e
+--- /dev/null
++++ b/tools/edit.py
+@@ -0,0 +1,71 @@
++#!/usr/bin/env python3
++import argparse
++import json
++import os
++import sys
++
++def replace_in_file(path, search, replace, count):
++    if not os.path.exists(path):
++        print(f"[edit.py] ERROR: File not found: {path}", file=sys.stderr)
++        return 1
++    with open(path, 'r', encoding='utf-8') as f:
++        data = f.read()
++    occurrences = data.count(search)
++    if occurrences == 0:
++        print(f"[edit.py] WARN: No occurrences found in {path} for search text.")
++        return 2
++    n = occurrences if count in (-1, 0) else min(count, occurrences)
++    new_data = data.replace(search, replace, n if count != -1 else occurrences)
++    with open(path, 'w', encoding='utf-8') as f:
++        f.write(new_data)
++    print(f"[edit.py] OK: Replaced {n if count != -1 else occurrences} occurrence(s) in {path}.")
++    return 0
++
++def main():
++    parser = argparse.ArgumentParser(description="Simple file edit tool: search/replace with optional count.")
++    sub = parser.add_subparsers(dest='cmd', required=True)
++
++    p = sub.add_parser('replace', help='Replace occurrences of a string in a file')
++    p.add_argument('file', help='Path to file')
++    p.add_argument('search', help='Search string (exact match)')
++    p.add_argument('replace', help='Replacement string')
++    p.add_argument('--count', type=int, default=-1, help='Number of occurrences to replace (-1 for all)')
++
++    pj = sub.add_parser('apply', help='Apply a JSON script of operations')
++    pj.add_argument('jsonfile', help='Path to JSON file describing operations')
++    args = parser.parse_args()
++
++    if args.cmd == 'replace':
++        rc = replace_in_file(args.file, args.search, args.replace, args.count)
++        sys.exit(rc)
++    elif args.cmd == 'apply':
++        with open(args.jsonfile, 'r', encoding='utf-8') as f:
++            ops = json.load(f)
++        if not isinstance(ops, list):
++            print("[edit.py] ERROR: JSON must be a list of operations.", file=sys.stderr)
++            sys.exit(1)
++        rc_total = 0
++        for i, op in enumerate(ops, 1):
++            if op.get('op') != 'replace':
++                print(f"[edit.py] ERROR: Unsupported op at index {i}: {op.get('op')}", file=sys.stderr)
++                rc_total = 1
++                continue
++            file = op.get('file'); search = op.get('search'); replace = op.get('replace'); count = op.get('count', -1)
++            if not all(isinstance(x, str) for x in (file, search, replace)):
++                print(f"[edit.py] ERROR: Invalid fields in operation {i}", file=sys.stderr)
++                rc_total = 1
++                continue
++            if not isinstance(count, int):
++                print(f"[edit.py] ERROR: count must be int in operation {i}", file=sys.stderr)
++                rc_total = 1
++                continue
++            rc = replace_in_file(file, search, replace, count)
++            if rc not in (0,2):
++                rc_total = rc
++        sys.exit(rc_total)
++    else:
++        parser.print_help()
++        sys.exit(1)
++
++if __name__ == "__main__":
++    main()

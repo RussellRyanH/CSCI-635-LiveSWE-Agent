@@ -1,0 +1,166 @@
+diff --git a/edit_tool.py b/edit_tool.py
+new file mode 100755
+index 000000000..3c480a5a3
+--- /dev/null
++++ b/edit_tool.py
+@@ -0,0 +1,59 @@
++\
++    #!/usr/bin/env python3
++    import argparse
++    import re
++    from pathlib import Path
++    import sys
++
++    def replace_text(path, old, new, count=-1):
++        p = Path(path)
++        s = p.read_text(encoding="utf-8")
++        if old not in s:
++            print(f"[edit_tool] WARNING: pattern not found in {path}")
++        s2 = s.replace(old, new, count if count != -1 else s.count(old))
++        p.write_text(s2, encoding="utf-8")
++        print(f"[edit_tool] Replaced occurrences in {path}")
++
++    def insert_after_pattern(path, pattern, insert_text, first_only=True, regex=False):
++        p = Path(path)
++        s = p.read_text(encoding="utf-8").splitlines(keepends=False)
++        out = []
++        inserted = 0
++        for line in s:
++            out.append(line)
++            match = (re.search(pattern, line) if regex else (pattern in line))
++            if match and (not first_only or inserted == 0):
++                out.append(insert_text)
++                inserted += 1
++        if inserted == 0:
++            print(f"[edit_tool] WARNING: no match for pattern in {path}")
++        p.write_text("\n".join(out) + ("\n" if s and s[-1] != "" else ""), encoding="utf-8")
++        print(f"[edit_tool] Inserted after {inserted} line(s) in {path}")
++
++    def main():
++        ap = argparse.ArgumentParser(description="Simple file edit tool")
++        sub = ap.add_subparsers(dest="cmd", required=True)
++
++        rp = sub.add_parser("replace", help="Replace text")
++        rp.add_argument("file")
++        rp.add_argument("old")
++        rp.add_argument("new")
++        rp.add_argument("--count", type=int, default=-1, help="Max replacements (-1 for all)")
++
++        ia = sub.add_parser("insert-after", help="Insert text after a line matching pattern")
++        ia.add_argument("file")
++        ia.add_argument("pattern")
++        ia.add_argument("text")
++        ia.add_argument("--all", action="store_true", help="Insert after all matches (default only first)")
++        ia.add_argument("--regex", action="store_true", help="Treat pattern as regex")
++
++        args = ap.parse_args()
++        if args.cmd == "replace":
++            replace_text(args.file, args.old, args.new, args.count)
++        elif args.cmd == "insert-after":
++            insert_after_pattern(args.file, args.pattern, args.text, first_only=not args.all, regex=args.regex)
++        else:
++            ap.error("Unknown command")
++
++    if __name__ == "__main__":
++        main()
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 000000000..28c1e2bba
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,19 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task, if you have learned any additional information about the task that should be added to the task description, or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Note that the task description can be changed by modifying the task_description.txt file directly. Anytime you execute commands that provide insight into the issue you are solving, you MUST add these insights to the task description before proceeding!
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++
++--- Additions to workflow reminders ---
++- Before editing code, ensure that insights are captured in task_description.txt (done).
++- Implement fix by skipping None estimators during sample_weight support check in _BaseVoting.fit.
++- Create a small Python edit tool to make targeted file modifications safely.
++- After the change, create and run a minimal reproduction script using simple mock estimators (pure Python) to avoid compiled dependencies.
++
++--- Additions to workflow reminders ---
++- Capture findings in task_description.txt before code edits (done).
++- Implement fix by skipping None estimators during sample_weight support check in _BaseVoting.fit.
++- Consider whether VotingRegressor shares similar logic and apply analogous fix if needed.
++- Create and use a small Python-based edit tool to modify files safely and repeatably.
++- After implementing the fix, create and run a minimal reproduction script to validate behavior without heavy dependencies.
++- Run relevant voting tests to ensure no regressions.
+diff --git a/sklearn/ensemble/voting.py b/sklearn/ensemble/voting.py
+index 7afa7180c..d8e14b152 100644
+--- a/sklearn/ensemble/voting.py
++++ b/sklearn/ensemble/voting.py
+@@ -78,6 +78,8 @@ class _BaseVoting(_BaseComposition, TransformerMixin):
+ 
+         if sample_weight is not None:
+             for name, step in self.estimators:
++                if step is None:
++                    continue
+                 if not has_fit_parameter(step, 'sample_weight'):
+                     raise ValueError('Underlying estimator \'%s\' does not'
+                                      ' support sample weights.' % name)
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 000000000..fd852caac
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,57 @@
++Voting estimator will fail at fit if weights are passed and an estimator is None
++Because we don't check for an estimator to be None in sample_weight support, fit is failing.
++
++python
++    X, y = load_iris(return_X_y=True)
++    voter = VotingClassifier(
++        estimators=[('lr', LogisticRegression()),
++                    ('rf', RandomForestClassifier())]
++    )
++    voter.fit(X, y, sample_weight=np.ones(y.shape))
++    voter.set_params(lr=None)
++    voter.fit(X, y, sample_weight=np.ones(y.shape))
++
++
++
++AttributeError: 'NoneType' object has no attribute 'fit'
++
++
++
++--- Update (from investigation on sklearn/ensemble/voting.py) ---
++- Root cause: In _BaseVoting.fit (sklearn/ensemble/voting.py), when sample_weight is not None, the code loops over all (name, step) in self.estimators and calls has_fit_parameter(step, 'sample_weight') without skipping estimators where step is None. This leads to AttributeError: 'NoneType' object has no attribute 'fit' (indirectly via has_fit_parameter trying to inspect fit on None) after setting one estimator to None and calling fit with sample_weight.
++- Fix direction: Modify the loop to continue when step is None before checking has_fit_parameter.
++- Relevant snippet (pre-fix):
++    if sample_weight is not None:
++        for name, step in self.estimators:
++            if not has_fit_parameter(step, 'sample_weight'):
++                raise ValueError(...)
++- Expected change: Insert  in that loop.
++--- Update (investigation on sklearn/ensemble/voting.py) ---
++- Root cause identified: In _BaseVoting.fit, when sample_weight is not None, the loop iterates over all (name, step) in self.estimators and calls has_fit_parameter(step, 'sample_weight') without skipping estimators where step is None. This leads to errors after setting one estimator to None and calling fit with sample_weight.
++- Relevant snippet before fix:
++    if sample_weight is not None:
++        for name, step in self.estimators:
++            if not has_fit_parameter(step, 'sample_weight'):
++                raise ValueError("Underlying estimator '%s' does not support sample weights." % name)
++- Planned fix: Skip None estimators in the sample_weight support check by inserting:
++    if step is None:
++        continue
++- Note: Fitting already skips None estimators in the Parallel call.
++
++--- Update (investigation on sklearn/ensemble/voting.py) ---
++- Root cause identified: In _BaseVoting.fit, when sample_weight is not None, the loop over self.estimators calls has_fit_parameter(step, 'sample_weight') without skipping estimators where step is None. This leads to errors when an estimator is set to None and fit is called with sample_weight.
++- Relevant pre-fix snippet:
++    if sample_weight is not None:
++        for name, step in self.estimators:
++            if not has_fit_parameter(step, 'sample_weight'):
++                raise ValueError("Underlying estimator '%s' does not support sample weights." % name)
++- Planned fix: Skip None estimators in that loop by inserting:
++    if step is None:
++        continue
++  Note: Fitting already skips None estimators in the Parallel fitting stage.
++- Also consider whether VotingRegressor has a similar check and update accordingly if needed.
++--- Validation update ---
++- Implemented fix: inserted guard 'if step is None: continue' in _BaseVoting.fit's sample_weight support loop to skip None estimators.
++- Minimal reproduction using a compliant dummy estimator (with get_params/set_params) confirmed:
++  - First fit with sample_weight works.
++  - After set_params(lr=None), second fit with sample_weight also works; estimators_ excludes the None estimator.

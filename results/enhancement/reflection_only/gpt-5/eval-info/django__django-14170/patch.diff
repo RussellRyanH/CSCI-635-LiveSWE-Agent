@@ -1,0 +1,183 @@
+diff --git a/TASK_DESCRIPTION_PATH b/TASK_DESCRIPTION_PATH
+new file mode 100644
+index 0000000000..d1f47d0422
+--- /dev/null
++++ b/TASK_DESCRIPTION_PATH
+@@ -0,0 +1,20 @@
++Query optimization in YearLookup breaks filtering by __iso_year
++Description
++	 
++		(last modified by Florian Demmer)
++	 
++The optimization to use BETWEEN instead of the EXTRACT operation in ​YearLookup is also registered for the ​__iso_year lookup, which breaks the functionality provided by ​ExtractIsoYear when used via the lookup.
++This has unfortunately been broken ever since ExtractIsoYear was introduced in ​Django 2.2 via #28649 and wasn't easy to track down since ExtractIsoYear when used by itself eg. in an annotation works perfectly fine. Just when using the lookup in a filter, the optimization is used (even when explicitly using an annotation):
++# annotation works
++>>> qs = DTModel.objects.annotate(extracted=ExtractIsoYear('start_date')).only('id')
++>>> print(qs.query)
++SELECT db_functions_dtmodel.id, EXTRACT('isoyear' FROM db_functions_dtmodel.start_date) AS extracted FROM db_functions_dtmodel
++# explicit annotation used in filter does not use extracted and adds BETWEEN
++>>> print(qs.filter(extracted=2020).query)
++SELECT db_functions_dtmodel.id, EXTRACT('isoyear' FROM db_functions_dtmodel.start_date) AS extracted FROM db_functions_dtmodel WHERE db_functions_dtmodel.start_date BETWEEN 2020-01-01 AND 2020-12-31
++# implicit lookup uses BETWEEN
++>>> print(DTModel.objects.filter(start_date__iso_year=2020).only('id').query)
++SELECT db_functions_dtmodel.id FROM db_functions_dtmodel WHERE db_functions_dtmodel.start_date BETWEEN 2020-01-01 AND 2020-12-31
++This results in the wrong data being returned by filters using iso_year.
++This PR fixes the behaviour, reverts the invalid changes to the tests and extends one test to catch this problem: ​https://github.com/django/django/pull/14157
++
+diff --git a/django/db/models/lookups.py b/django/db/models/lookups.py
+index 916478d075..28b13ea52f 100644
+--- a/django/db/models/lookups.py
++++ b/django/db/models/lookups.py
+@@ -550,6 +550,9 @@ class YearLookup(Lookup):
+         # Avoid the extract operation if the rhs is a direct value to allow
+         # indexes to be used.
+         if self.rhs_is_direct_value():
++            # Do not apply BETWEEN optimization for ISO week-numbering year.
++            if getattr(self.lhs, "lookup_name", None) == "iso_year":
++                return super().as_sql(compiler, connection)
+             # Skip the extract part by directly using the originating field,
+             # that is self.lhs.lhs.
+             lhs_sql, params = self.process_lhs(compiler, connection, self.lhs.lhs)
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..360b7f4082
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,8 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++- Add workflow reminder: When dealing with date lookups, grep for "YearLookup", "ExtractIsoYear", and "__iso_year" across django/db/models/ to find where BETWEEN optimization is implemented. Ensure iso_year lookup bypasses BETWEEN optimization so ExtractIsoYear is used in filters.
++- Always reproduce the issue with a minimal management command or shell snippet before and after changes.
++- Prefer creating/using scripts/edit_file.py for precise, reviewable code edits (regex replace, insert before/after), and show diffs.
++- After implementation, run or simulate ORM query generation to confirm the SQL uses EXTRACT('isoyear' FROM ...) for __iso_year filters and does not inject BETWEEN incorrectly.
+diff --git a/scripts/edit_file.py b/scripts/edit_file.py
+new file mode 100755
+index 0000000000..1e1d208643
+--- /dev/null
++++ b/scripts/edit_file.py
+@@ -0,0 +1,123 @@
++#!/usr/bin/env python3
++import argparse
++import sys
++import re
++from pathlib import Path
++import difflib
++
++def read(path):
++    p = Path(path)
++    if not p.exists():
++        print(f"[ERROR] File not found: {path}", file=sys.stderr)
++        sys.exit(2)
++    return p.read_text(encoding="utf-8"), p
++
++def write(p, content, dry_run=False):
++    if dry_run:
++        return
++    p.write_text(content, encoding="utf-8")
++
++def show_diff(old, new, path):
++    diff = difflib.unified_diff(
++        old.splitlines(keepends=True),
++        new.splitlines(keepends=True),
++        fromfile=f"{path} (old)",
++        tofile=f"{path} (new)",
++        lineterm=""
++    )
++    out = "".join(diff)
++    if out.strip():
++        print(out)
++    else:
++        print("[INFO] No changes produced.")
++
++def do_replace(path, old, new, count=-1, literal=True, dry_run=False):
++    text, p = read(path)
++    if literal:
++        occurrences = text.count(old)
++        updated = text.replace(old, new, count if count >= 0 else -1)
++    else:
++        occurrences = len(list(re.finditer(old, text, flags=re.MULTILINE|re.DOTALL)))
++        updated, n = re.subn(old, new, text, count=0 if count < 0 else count, flags=re.MULTILINE|re.DOTALL)
++        occurrences = n
++    if occurrences == 0:
++        print("[WARN] No occurrences found; file unchanged.")
++    else:
++        print(f"[INFO] Replacements applied: {occurrences}")
++    show_diff(text, updated, path)
++    write(p, updated, dry_run=dry_run)
++
++def insert_rel(path, pattern, insert_text, before=False, regex=False, first_only=False, dry_run=False):
++    text, p = read(path)
++    lines = text.splitlines(keepends=True)
++    match_indexes = []
++    if regex:
++        cre = re.compile(pattern)
++        for i, line in enumerate(lines):
++            if cre.search(line):
++                match_indexes.append(i)
++    else:
++        for i, line in enumerate(lines):
++            if pattern in line:
++                match_indexes.append(i)
++    if not match_indexes:
++        print("[WARN] Pattern not found; file unchanged.")
++        return
++    targets = [match_indexes[0]] if first_only else match_indexes
++    offset = 0
++    for idx in targets:
++        pos = idx + offset + (0 if before else 1)
++        ins = insert_text if insert_text.endswith("\\n") else insert_text + "\\n"
++        lines.insert(pos, ins)
++        offset += 1
++    updated = "".join(lines)
++    print(f"[INFO] Inserted text {'before' if before else 'after'} pattern at {len(targets)} location(s).")
++    show_diff(text, updated, path)
++    write(p, updated, dry_run=dry_run)
++
++def main():
++    ap = argparse.ArgumentParser(description="Simple file editor tool for search/replace and insert operations.")
++    sub = ap.add_subparsers(dest="cmd", required=True)
++
++    rp = sub.add_parser("replace", help="Literal replace")
++    rp.add_argument("path")
++    rp.add_argument("old")
++    rp.add_argument("new")
++    rp.add_argument("--count", type=int, default=-1, help="-1 for all")
++    rp.add_argument("--dry-run", action="store_true")
++
++    rr = sub.add_parser("re", help="Regex replace")
++    rr.add_argument("path")
++    rr.add_argument("pattern")
++    rr.add_argument("repl")
++    rr.add_argument("--count", type=int, default=-1, help="-1 for all")
++    rr.add_argument("--dry-run", action="store_true")
++
++    ia = sub.add_parser("insert-after", help="Insert text after matching line(s)")
++    ia.add_argument("path")
++    ia.add_argument("pattern")
++    ia.add_argument("text")
++    ia.add_argument("--regex", action="store_true")
++    ia.add_argument("--first-only", action="store_true")
++    ia.add_argument("--dry-run", action="store_true")
++
++    ib = sub.add_parser("insert-before", help="Insert text before matching line(s)")
++    ib.add_argument("path")
++    ib.add_argument("pattern")
++    ib.add_argument("text")
++    ib.add_argument("--regex", action="store_true")
++    ib.add_argument("--first-only", action="store_true")
++    ib.add_argument("--dry-run", action="store_true")
++
++    args = ap.parse_args()
++    if args.cmd == "replace":
++        do_replace(args.path, args.old, args.new, count=args.count, literal=True, dry_run=args.dry_run)
++    elif args.cmd == "re":
++        do_replace(args.path, args.pattern, args.repl, count=args.count, literal=False, dry_run=args.dry_run)
++    elif args.cmd == "insert-after":
++        insert_rel(args.path, args.pattern, args.text, before=False, regex=args.regex, first_only=args.first_only, dry_run=args.dry_run)
++    elif args.cmd == "insert-before":
++        insert_rel(args.path, args.pattern, args.text, before=True, regex=args.regex, first_only=args.first_only, dry_run=args.dry_run)
++
++if __name__ == "__main__":
++    main()

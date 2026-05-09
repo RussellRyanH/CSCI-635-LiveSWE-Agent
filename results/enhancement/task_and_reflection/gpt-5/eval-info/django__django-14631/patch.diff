@@ -1,0 +1,315 @@
+diff --git a/devtools/ed.py b/devtools/ed.py
+new file mode 100644
+index 0000000000..759abc0ae8
+--- /dev/null
++++ b/devtools/ed.py
+@@ -0,0 +1,121 @@
++#!/usr/bin/env python3
++import sys, json, re, pathlib
++
++USAGE = """
++devtools/ed.py
++- Reads a JSON array of edit operations from stdin.
++- Each operation is an object with:
++  {
++    "file": "path/to/file",
++    "action": "replace_once|replace_all|insert_after|insert_before",
++    "pattern": "regex or literal (if use_regex=false)",
++    "text": "replacement or text to insert",
++    "use_regex": true|false (default false),
++    "count": int (optional for replace_all to limit replacements)
++  }
++- Exits non-zero on failure and prints diagnostics.
++"""
++
++def load_text(p: pathlib.Path):
++    try:
++        return p.read_text(encoding="utf-8")
++    except FileNotFoundError:
++        sys.stderr.write(f"[ed] ERROR: File not found: {p}\n")
++        sys.exit(2)
++
++def save_text(p: pathlib.Path, content: str):
++    p.write_text(content, encoding="utf-8")
++
++def replace_once(s, pattern, repl, use_regex=False):
++    if use_regex:
++        return re.sub(pattern, repl, s, count=1)
++    else:
++        idx = s.find(pattern)
++        if idx == -1:
++            raise ValueError("pattern not found for replace_once")
++        return s[:idx] + repl + s[idx+len(pattern):]
++
++def replace_all(s, pattern, repl, use_regex=False, count=None):
++    if use_regex:
++        return re.sub(pattern, repl, s, count=0 if count is None else count)
++    else:
++        if count is None:
++            return s.replace(pattern, repl)
++        out = []
++        i = 0
++        n = 0
++        while i < len(s):
++            j = s.find(pattern, i)
++            if j == -1 or (count is not None and n >= count):
++                out.append(s[i:])
++                break
++            out.append(s[i:j])
++            out.append(repl)
++            i = j + len(pattern)
++            n += 1
++        return "".join(out)
++
++def insert_after(s, pattern, text, use_regex=False):
++    if use_regex:
++        m = re.search(pattern, s)
++        if not m:
++            raise ValueError("pattern not found for insert_after")
++        idx = m.end()
++    else:
++        idx = s.find(pattern)
++        if idx == -1:
++            raise ValueError("pattern not found for insert_after")
++        idx += len(pattern)
++    return s[:idx] + text + s[idx:]
++
++def insert_before(s, pattern, text, use_regex=False):
++    if use_regex:
++        m = re.search(pattern, s)
++        if not m:
++            raise ValueError("pattern not found for insert_before")
++        idx = m.start()
++    else:
++        idx = s.find(pattern)
++        if idx == -1:
++            raise ValueError("pattern not found for insert_before")
++    return s[:idx] + text + s[idx:]
++
++def main():
++    try:
++        ops = json.load(sys.stdin)
++    except Exception as e:
++        sys.stderr.write(f"[ed] ERROR: Failed to parse JSON from stdin: {e}\n{USAGE}\n")
++        sys.exit(2)
++    if not isinstance(ops, list):
++        sys.stderr.write("[ed] ERROR: Input must be a JSON array of operations.\n")
++        sys.exit(2)
++    for i, op in enumerate(ops, 1):
++        try:
++            path = pathlib.Path(op["file"])
++            action = op["action"]
++            pattern = op.get("pattern", "")
++            text = op.get("text", "")
++            use_regex = bool(op.get("use_regex", False))
++            count = op.get("count", None)
++            src = load_text(path)
++            if action == "replace_once":
++                dst = replace_once(src, pattern, text, use_regex)
++            elif action == "replace_all":
++                dst = replace_all(src, pattern, text, use_regex, count)
++            elif action == "insert_after":
++                dst = insert_after(src, pattern, text, use_regex)
++            elif action == "insert_before":
++                dst = insert_before(src, pattern, text, use_regex)
++            else:
++                raise ValueError(f"Unknown action: {action}")
++            if dst == src:
++                sys.stderr.write(f"[ed] WARN: No change for op {i} on {path}\n")
++            else:
++                save_text(path, dst)
++                sys.stderr.write(f"[ed] INFO: Modified {path} via {action}\n")
++        except Exception as e:
++            sys.stderr.write(f"[ed] ERROR: op {i} failed: {e}\n")
++            sys.exit(2)
++    print("[ed] OK")
++if __name__ == "__main__":
++    main()
+diff --git a/django/forms/boundfield.py b/django/forms/boundfield.py
+index 88adadb37d..7205870dea 100644
+--- a/django/forms/boundfield.py
++++ b/django/forms/boundfield.py
+@@ -1,3 +1,4 @@
++from django.core.exceptions import ValidationError
+ import datetime
+ import re
+ 
+@@ -129,6 +130,27 @@ class BoundField:
+         if self.form.is_bound:
+             data = self.field.bound_data(self.data, data)
+         return self.field.prepare_value(data)
++    def _did_change(self):
++        """
++        Determine whether form data for this field differs from its initial value.
++        Mirrors BaseForm.changed_data per-field logic but operates on this BoundField.
++        """
++        field = self.field
++        form = self.form
++        data_value = form._field_data_value(field, self.html_name)
++        if not field.show_hidden_initial:
++            initial_value = self.initial
++        else:
++            initial_prefixed_name = form.add_initial_prefix(self.name)
++            hidden_widget = field.hidden_widget()
++            try:
++                initial_value = field.to_python(
++                    form._widget_data_value(hidden_widget, initial_prefixed_name)
++                )
++            except ValidationError:
++                return True
++        return field.has_changed(initial_value, data_value)
++
+ 
+     def label_tag(self, contents=None, attrs=None, label_suffix=None):
+         """
+diff --git a/django/forms/forms.py b/django/forms/forms.py
+index d14037bfe9..1584f20333 100644
+--- a/django/forms/forms.py
++++ b/django/forms/forms.py
+@@ -388,13 +388,14 @@ class BaseForm:
+ 
+     def _clean_fields(self):
+         for name, field in self.fields.items():
++            bf = self[name]
+             if field.disabled:
+-                value = self.get_initial_for_field(field, name)
++                value = bf.initial
+             else:
+-                value = self._field_data_value(field, self.add_prefix(name))
++                value = bf.data
+             try:
+                 if isinstance(field, FileField):
+-                    initial = self.get_initial_for_field(field, name)
++                    initial = bf.initial
+                     value = field.clean(value, initial)
+                 else:
+                     value = field.clean(value)
+@@ -405,6 +406,7 @@ class BaseForm:
+             except ValidationError as e:
+                 self.add_error(name, e)
+ 
++
+     def _clean_form(self):
+         try:
+             cleaned_data = self.clean()
+@@ -434,30 +436,14 @@ class BaseForm:
+         """Return True if data differs from initial."""
+         return bool(self.changed_data)
+ 
++    def _bound_items(self):
++        """Yield (name, BoundField) for each field in this form."""
++        for name in self.fields:
++            yield name, self[name]
++
+     @cached_property
+     def changed_data(self):
+-        data = []
+-        for name, field in self.fields.items():
+-            data_value = self._field_data_value(field, self.add_prefix(name))
+-            if not field.show_hidden_initial:
+-                # Use the BoundField's initial as this is the value passed to
+-                # the widget.
+-                initial_value = self[name].initial
+-            else:
+-                initial_prefixed_name = self.add_initial_prefix(name)
+-                hidden_widget = field.hidden_widget()
+-                try:
+-                    initial_value = field.to_python(
+-                        self._widget_data_value(hidden_widget, initial_prefixed_name)
+-                    )
+-                except ValidationError:
+-                    # Always assume data has changed if validation fails.
+-                    data.append(name)
+-                    continue
+-            if field.has_changed(initial_value, data_value):
+-                data.append(name)
+-        return data
+-
++        return [name for name, bf in self._bound_items() if bf._did_change()]
+     @property
+     def media(self):
+         """Return all media required to render the widgets on this form."""
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..a816fb7736
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,34 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task, if you have learned any additional information about the task that should be added to the task description, or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Note that the task description can be changed by modifying the task_description.txt file directly. Anytime you execute commands that provide insight into the issue you are solving, you MUST add these insights to the task description before proceeding!
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++
++
++Workflow enhancements and reminders (date: 2026-05-02 21:38:31Z):
++- If the expected /testbed directory is missing, operate from repo root and document this in task_description.txt before proceeding.
++- Prefer reading and modifying django/forms/forms.py and django/forms/boundfield.py to route value access through BoundField.
++- Implement or reuse a BoundField method (e.g., _did_change) and update BaseForm.changed_data to iterate over bound items.
++- Update BaseForm._clean_fields to use BoundField for retrieving initial/data for consistency and to align with form[name].initial.
++- Create and use lightweight editing tools to make safe, repeatable changes.
++
++
++Workflow enhancements and reminders (date: 2026-05-02T21:39:01Z):
++- If the expected /testbed directory is missing, operate from repo root and document this in task_description.txt before proceeding.
++- Prefer reading and modifying django/forms/forms.py and django/forms/boundfield.py to route value access through BoundField.
++- Implement or reuse a BoundField method (e.g., _did_change) and update BaseForm.changed_data to iterate over bound items.
++- Update BaseForm._clean_fields to use BoundField for retrieving initial/data for consistency and to align with form[name].initial.
++- Create and use lightweight editing tools to make safe, repeatable changes.
++
++
++Workflow enhancements and reminders (date: 2026-05-02T21:40:57Z):
++- Operate from repo root; /testbed is absent. Keep task_description.txt updated with insights.
++- Modify django/forms/forms.py and django/forms/boundfield.py to access values via BoundField for consistency.
++- Implement BoundField._did_change() and update BaseForm.changed_data to iterate via _bound_items().
++- Update BaseForm._clean_fields() to use bf.initial for disabled and bf.data otherwise; use bf.initial for FileField initial.
++
++
++Reminder: Ensure BaseForm.changed_data uses bf._did_change() and _clean_fields uses bf.initial/bf.data. (2026-05-02T21:44:11Z)
++
++
++Reminder (2026-05-02T21:48:09Z): When sanity-testing changed_data for Date/Time fields, use typed initial values (e.g., datetime.date) to match Django behavior.
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 0000000000..d5ff6541f7
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,38 @@
++BaseForm's _clean_fields() and changed_data should access values via BoundField
++Description
++	 
++		(last modified by Chris Jerdonek)
++	 
++While working on #32917, I noticed that ​BaseForm._clean_fields() and ​BaseForm.changed_data don't currently access their values through a BoundField object. It would be better for consistency if they did, and to reduce the number of code paths.
++One consequence of the current code is that form._clean_fields() can return a different value from form[name].initial when they should be the same. This case is almost, but not quite, covered by ​test_datetime_clean_initial_callable_disabled() (the test can be adjusted to cover this case).
++As part of this ticket and in line with accessing data through the BoundField objects, I noticed that the code would also be simpler if the per-field logic of changed_data() were moved into a method of the BoundField class. It could be called something like bf.did_change(). This would be more appropriate because whether form data changed for a field is a property of its BoundField (as it depends on the underlying form data), as opposed to the unbound field. With this change, the method could change from its current ~20 lines to something like this--
++@cached_property
++def changed_data(self):
++	return [name for name, bf in self._bound_items() if bf._did_change()]
++A similar change could be made to BaseForm._clean_fields().
++
++
++
++Additional insights discovered during exploration (date: 2026-05-02 21:38:31Z):
++- The repository does not contain a /testbed directory; work will be performed in the repository root.
++- The Django source appears present under ./django; relevant targets likely include django/forms/forms.py (BaseForm) and django/forms/boundfield.py (BoundField).
++- Planned change: Access values via BoundField in BaseForm._clean_fields() and BaseForm.changed_data, and move per-field changed logic into BoundField (e.g., bf._did_change()).
++
++
++Additional insights discovered during exploration (date: 2026-05-02T21:39:01Z):
++- The repository does not contain a /testbed directory; work will be performed in the repository root.
++- The Django source appears present under ./django; relevant targets likely include django/forms/forms.py (BaseForm) and django/forms/boundfield.py (BoundField).
++- Planned change: Access values via BoundField in BaseForm._clean_fields() and BaseForm.changed_data, and move per-field changed logic into BoundField (e.g., bf._did_change()).
++
++
++Additional insights discovered during exploration (date: 2026-05-02T21:40:57Z):
++- The repository does not contain a /testbed directory; work will be performed in the repository root.
++- Relevant code located at django/forms/forms.py (BaseForm) and django/forms/boundfield.py (BoundField).
++- Plan: route BaseForm._clean_fields() and changed_data through BoundField; move per-field changed logic into BoundField._did_change().
++
++
++Additional insights discovered (via code search): BoundField and BaseForm are located at django/forms/boundfield.py and django/forms/forms.py respectively. Planning to route changed_data and _clean_fields through BoundField for consistency. (2026-05-02T21:44:11Z)
++
++
++Additional insights (2026-05-02T21:48:09Z):
++- Date/Time fields compare data (to_python) against initial without coercing initial; to avoid false positives in changed_data, initial should be a typed value (e.g., datetime.date) rather than a string.

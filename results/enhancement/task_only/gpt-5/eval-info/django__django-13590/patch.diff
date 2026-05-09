@@ -1,0 +1,186 @@
+diff --git a/REFLECTION_PROMPT_PATH b/REFLECTION_PROMPT_PATH
+new file mode 100644
+index 0000000000..8b13789179
+--- /dev/null
++++ b/REFLECTION_PROMPT_PATH
+@@ -0,0 +1 @@
++
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index 4648daf395..4f88926176 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -1076,11 +1076,30 @@ class Query(BaseExpression):
+             )
+         elif isinstance(value, (list, tuple)):
+             # The items of the iterable may be expressions and therefore need
+-            # to be resolved independently.
+-            return type(value)(
+-                self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
+-                for sub_value in value
+-            )
++            # to be resolved independently. Preserve the original type where
++            # possible. For tuples, including namedtuples, resolve elements
++            # first and then reconstruct:
++            # - plain tuples: return a tuple of resolved values,
++            # - tuple subclasses (e.g., namedtuples): expand positional args,
++            #   falling back to passing a single iterable if required,
++            # - lists: pass an iterator to the list constructor.
++            if isinstance(value, list):
++                return type(value)(
++                    self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
++                    for sub_value in value
++                )
++            else:
++                resolved = tuple(
++                    self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
++                    for sub_value in value
++                )
++                value_type = type(value)
++                if value_type is tuple:
++                    return resolved
++                try:
++                    return value_type(*resolved)
++                except TypeError:
++                    return value_type(resolved)
+         return value
+ 
+     def solve_lookup_type(self, lookup):
+diff --git a/edit_resolve_fix.py b/edit_resolve_fix.py
+new file mode 100644
+index 0000000000..243d552b16
+--- /dev/null
++++ b/edit_resolve_fix.py
+@@ -0,0 +1,72 @@
++#!/usr/bin/env python3
++import sys
++from pathlib import Path
++
++def main():
++    path = Path("django/db/models/sql/query.py")
++    src = path.read_text()
++
++    lines = src.splitlines(keepends=True)
++
++    # Find the 'elif isinstance(value, (list, tuple)):' block.
++    start_idx = None
++    for i, line in enumerate(lines):
++        if line == "        elif isinstance(value, (list, tuple)):\n":
++            start_idx = i
++            break
++
++    if start_idx is None:
++        print("Start pattern not found.", file=sys.stderr)
++        sys.exit(1)
++
++    # Find the end of the old block by locating the closing ')' line at the correct indent.
++    # We expect a structure:
++    #   return type(value)(
++    #       self.resolve_lookup_value(...)
++    #       for sub_value in value
++    #   )
++    end_idx = None
++    for j in range(start_idx + 1, min(len(lines), start_idx + 40)):
++        if lines[j] == "            )\n":
++            end_idx = j
++            break
++
++    if end_idx is None:
++        print("End pattern not found.", file=sys.stderr)
++        sys.exit(1)
++
++    new_block = [
++        "        elif isinstance(value, (list, tuple)):\n",
++        "            # The items of the iterable may be expressions and therefore need\n",
++        "            # to be resolved independently. Preserve the original type where\n",
++        "            # possible. For tuples, including namedtuples, resolve elements\n",
++        "            # first and then reconstruct:\n",
++        "            # - plain tuples: return a tuple of resolved values,\n",
++        "            # - tuple subclasses (e.g., namedtuples): expand positional args,\n",
++        "            #   falling back to passing a single iterable if required,\n",
++        "            # - lists: pass an iterator to the list constructor.\n",
++        "            if isinstance(value, list):\n",
++        "                return type(value)(\n",
++        "                    self.resolve_lookup_value(sub_value, can_reuse, allow_joins)\n",
++        "                    for sub_value in value\n",
++        "                )\n",
++        "            else:\n",
++        "                resolved = tuple(\n",
++        "                    self.resolve_lookup_value(sub_value, can_reuse, allow_joins)\n",
++        "                    for sub_value in value\n",
++        "                )\n",
++        "                value_type = type(value)\n",
++        "                if value_type is tuple:\n",
++        "                    return resolved\n",
++        "                try:\n",
++        "                    return value_type(*resolved)\n",
++        "                except TypeError:\n",
++        "                    return value_type(resolved)\n",
++    ]
++
++    updated = lines[:start_idx] + new_block + lines[end_idx+1:]
++    path.write_text("".join(updated))
++    print("Patched resolve_lookup_value successfully.")
++
++if __name__ == "__main__":
++    main()
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 0000000000..3145f05f94
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,24 @@
++Upgrading 2.2>3.0 causes named tuples used as arguments to __range to error.
++Description
++	
++I noticed this while upgrading a project from 2.2 to 3.0.
++This project passes named 2-tuples as arguments to range queryset filters. This works fine on 2.2. On 3.0 it causes the following error: TypeError: __new__() missing 1 required positional argument: 'far'.
++This happens because django.db.models.sql.query.Query.resolve_lookup_value goes into the tuple elements to resolve lookups and then attempts to reconstitute the tuple with the resolved elements.
++When it attempts to construct the new tuple it preserves the type (the named tuple) but it passes a iterator to it's constructor.
++NamedTuples don't have the code path for copying an iterator, and so it errors on insufficient arguments.
++The fix is to * expand the contents of the iterator into the constructor.
++
++[Insight 1 - repo scan]: The repository is Django (contains 'django' package and Django-style tests). The bug is likely in django/db/models/sql/query.py within Query.resolve_lookup_value, which reconstructs tuples after resolving lookups. The fix should ensure that when reconstituting namedtuples, the constructor is called with unpacked elements (*iterator) rather than a single iterator to avoid TypeError.
++[Insight 1 - repo scan]: The repository is Django (contains the 'django' package and Django-style tests). The bug is likely in django/db/models/sql/query.py within Query.resolve_lookup_value, which reconstructs tuples after resolving lookups. The fix should ensure that when reconstituting namedtuples, the constructor is called with unpacked elements (*iterator) rather than a single iterator to avoid TypeError.
++[Insight 2 - code location]: Query.resolve_lookup_value is defined in django/db/models/sql/query.py around line 1072 and is called around line 1278. I will inspect this area to see how tuples (including namedtuples) are reconstructed after element-wise resolution, to apply the fix of unpacking elements into the constructor.
++[Insight 3 - code behavior]: In resolve_lookup_value, tuples and lists are reconstructed using type(value)(<generator>). This works for list/tuple (their constructors accept an iterable) but fails for namedtuples (which expect positional args). We'll update logic to unpack elements for tuple subclasses (namedtuples) while preserving behavior for lists and plain tuples.
++[Insight 3 - code behavior]: In django/db/models/sql/query.py, resolve_lookup_value reconstructs iterables via `return type(value)(<generator>)` which passes a single iterable to constructors. This works for list and plain tuple constructors (they accept an iterable) but breaks for namedtuples (tuple subclasses) which expect positional arguments. The fix should reconstruct as:
++- lists: keep current behavior (constructor from iterable),
++- plain tuples: return a tuple of resolved items,
++- tuple subclasses (e.g., namedtuples): call constructor with unpacked elements (*resolved), with a safe fallback if needed.
++[Insight 4 - fix applied]: Updated django/db/models/sql/query.py::Query.resolve_lookup_value:
++- Lists: keep constructor-from-iterable behavior.
++- Tuples: resolve to a tuple first; if plain tuple, return the tuple; if a tuple subclass (e.g., namedtuple), call the constructor with unpacked elements (*resolved), with a fallback to passing the iterable if needed.
++The file compiles successfully after the change.
++[Insight 5 - tests search]: The test suite includes many __range usages but no cases passing a namedtuple to __range. Therefore, I'll validate the fix with a direct check of Query.resolve_lookup_value using a namedtuple input.
++[Insight 6 - validation]: Verified fix by directly invoking Query.resolve_lookup_value with a namedtuple, plain tuple, and list. Namedtuple type and values were preserved via constructor unpacking, plain tuple returned as a tuple of resolved values, and list reconstruction worked as before. Validation succeeded.
+diff --git a/test_namedtuple_fix.py b/test_namedtuple_fix.py
+new file mode 100644
+index 0000000000..8dfe680a09
+--- /dev/null
++++ b/test_namedtuple_fix.py
+@@ -0,0 +1,25 @@
++from collections import namedtuple
++from django.db.models.sql.query import Query
++
++def main():
++    q = Query(model=None)
++    Range = namedtuple('Range', ['near', 'far'])
++    r = Range(1, 2)
++    out = q.resolve_lookup_value(r, can_reuse=set(), allow_joins=True)
++    assert type(out) is Range, f"Expected namedtuple type preserved, got {type(out)}"
++    assert (out.near, out.far) == (1, 2), f"Expected values (1,2), got {(out.near, out.far)}"
++
++    t = (3, 4)
++    out2 = q.resolve_lookup_value(t, can_reuse=set(), allow_joins=True)
++    assert type(out2) is tuple, f"Expected tuple, got {type(out2)}"
++    assert out2 == (3, 4), f"Expected (3,4), got {out2}"
++
++    l = [5, 6]
++    out3 = q.resolve_lookup_value(l, can_reuse=set(), allow_joins=True)
++    assert type(out3) is list, f"Expected list, got {type(out3)}"
++    assert out3 == [5, 6], f"Expected [5,6], got {out3}"
++
++    print("OK: resolve_lookup_value preserves list/tuple and unpacks tuple subclasses (namedtuple).")
++
++if __name__ == "__main__":
++    main()

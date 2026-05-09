@@ -1,0 +1,218 @@
+diff --git a/TASK_DESCRIPTION_PATH b/TASK_DESCRIPTION_PATH
+new file mode 100644
+index 0000000000..36c30e45b9
+--- /dev/null
++++ b/TASK_DESCRIPTION_PATH
+@@ -0,0 +1,39 @@
++Migration optimizer does not reduce multiple AlterField
++Description
++	
++Let's consider the following operations: 
++operations = [
++	migrations.AddField(
++		model_name=book,
++		name=title,
++		field=models.CharField(max_length=256, null=True),
++	),
++	migrations.AlterField(
++		model_name=book,
++		name=title,
++		field=models.CharField(max_length=128, null=True),
++	),
++	migrations.AlterField(
++		model_name=book,
++		name=title,
++		field=models.CharField(max_length=128, null=True, help_text=help),
++	),
++	migrations.AlterField(
++		model_name=book,
++		name=title,
++		field=models.CharField(max_length=128, null=True, help_text=help, default=None),
++	),
++]
++If I run the optimizer, I get only the AddField, as we could expect. However, if the AddField model is separated from the AlterField (e.g. because of a non-elidable migration, or inside a non-squashed migration), none of the AlterField are reduced:
++optimizer.optimize(operations[1:], books) 
++[<AlterField model_name='book', name='title', field=<django.db.models.fields.CharField>>,
++ <AlterField model_name='book', name='title', field=<django.db.models.fields.CharField>>,
++ <AlterField model_name='book', name='title', field=<django.db.models.fields.CharField>>]
++Indeed, the AlterField.reduce does not consider the the case where operation is also an AlterField. 
++Is this behaviour intended? If so, could it be documented? 
++Otherwise, would it make sense to add something like
++		if isinstance(operation, AlterField) and self.is_same_field_operation(
++			operation
++		):
++			return [operation]
++
+diff --git a/django/db/migrations/operations/fields.py b/django/db/migrations/operations/fields.py
+index cd3aab43ad..75b3e86262 100644
+--- a/django/db/migrations/operations/fields.py
++++ b/django/db/migrations/operations/fields.py
+@@ -247,6 +247,9 @@ class AlterField(FieldOperation):
+         return "alter_%s_%s" % (self.model_name_lower, self.name_lower)
+ 
+     def reduce(self, operation, app_label):
++        # Collapse consecutive AlterField operations on the same field
++        if isinstance(operation, AlterField) and self.is_same_field_operation(operation):
++            return [operation]
+         if isinstance(operation, RemoveField) and self.is_same_field_operation(
+             operation
+         ):
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..9d611c798e
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,13 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++
++# Added guidance for optimizing Django migration AlterField reductions
++- Create a small reproduction script to run django.db.migrations.optimizer on sample operations to verify behavior before/after changes.
++- Locate AlterField.reduce and related optimizer logic (django/db/migrations/operations/fields.py and django/db/migrations/optimizer.py) to implement combining consecutive AlterField ops on the same field.
++- Ensure reductions preserve correctness: last AlterField should win, only if model_name and field name match, and there are no order-dependent side effects.
++- Add unit-level checks via the reproduction script before running full test suite to speed up iteration.
++- Use the scripts/apply_edits.py tool to make precise edits safely and repeatably.
++- Only modify non-test files under /testbed/django; do not edit tests or configuration.
++- After implementing, run Django test(s) or a focused subset touching migrations to confirm no regressions.
+diff --git a/scripts/apply_edits.py b/scripts/apply_edits.py
+new file mode 100755
+index 0000000000..c0090ea9ba
+--- /dev/null
++++ b/scripts/apply_edits.py
+@@ -0,0 +1,134 @@
++#!/usr/bin/env python3
++import sys, os, json, re, argparse, tempfile, shutil
++
++HELP = """apply_edits.py FILE
++Reads a JSON array of edit operations from stdin and applies them to FILE.
++Supported operations:
++- {"action": "replace", "pattern": "...", "repl": "...", "count": 0, "flags": ["I","M","S"]}
++- {"action": "insert_after", "pattern": "...", "text": "...", "flags": ["I","M","S"]}
++- {"action": "insert_before", "pattern": "...", "text": "...", "flags": ["I","M","S"]}
++- {"action": "ensure_contains", "pattern": "...", "text": "...", "where": "end|start", "flags": ["I","M","S"]}
++- {"action": "replace_between", "start_pattern": "...", "end_pattern": "...", "text": "...", "include_markers": false, "flags": ["I","M","S"]}
++Flags: I=IGNORECASE, M=MULTILINE, S=DOTALL
++Exit codes: 0 on success, 2 on no-op (no changes), 1 on error.
++"""
++
++def compile_flags(flags_list):
++    f = 0
++    if not flags_list:
++        return f
++    for fl in flags_list:
++        if fl == "I":
++            f |= re.IGNORECASE
++        elif fl == "M":
++            f |= re.MULTILINE
++        elif fl == "S":
++            f |= re.DOTALL
++    return f
++
++def main():
++    ap = argparse.ArgumentParser(description="Apply programmatic edits to a file", add_help=False)
++    ap.add_argument("file")
++    ap.add_argument("-h", "--help", action="store_true")
++    args, _ = ap.parse_known_args()
++    if args.help:
++        print(HELP)
++        return 0
++    path = args.file
++    try:
++        original = open(path, "r", encoding="utf-8").read()
++    except FileNotFoundError:
++        print(f"ERROR: file not found: {path}", file=sys.stderr)
++        return 1
++    try:
++        edits = json.load(sys.stdin)
++        if not isinstance(edits, list):
++            raise ValueError("Input JSON must be a list of operations")
++    except Exception as e:
++        print(f"ERROR: failed to parse JSON edits: {e}", file=sys.stderr)
++        return 1
++
++    content = original
++    changed = False
++
++    for i, op in enumerate(edits):
++        if not isinstance(op, dict) or "action" not in op:
++            print(f"ERROR: edit #{i} is invalid: {op}", file=sys.stderr)
++            return 1
++        action = op["action"]
++        if action == "replace":
++            flags = compile_flags(op.get("flags"))
++            count = int(op.get("count", 0))
++            pattern = re.compile(op["pattern"], flags)
++            new_content, n = pattern.subn(op.get("repl",""), content, count=count if count >= 0 else 0)
++            if n > 0:
++                content = new_content
++                changed = True
++        elif action == "insert_after":
++            flags = compile_flags(op.get("flags"))
++            pat = re.compile(op["pattern"], flags)
++            m = pat.search(content)
++            if m:
++                idx = m.end()
++                text = op.get("text","")
++                content = content[:idx] + text + content[idx:]
++                changed = True
++        elif action == "insert_before":
++            flags = compile_flags(op.get("flags"))
++            pat = re.compile(op["pattern"], flags)
++            m = pat.search(content)
++            if m:
++                idx = m.start()
++                text = op.get("text","")
++                content = content[:idx] + text + content[idx:]
++                changed = True
++        elif action == "ensure_contains":
++            flags = compile_flags(op.get("flags"))
++            pat = re.compile(op["pattern"], flags)
++            if not pat.search(content):
++                where = op.get("where","end")
++                text = op.get("text","")
++                if where == "start":
++                    content = text + content
++                else:
++                    content = content + text
++                changed = True
++        elif action == "replace_between":
++            flags = compile_flags(op.get("flags"))
++            sp = re.compile(op["start_pattern"], flags)
++            ep = re.compile(op["end_pattern"], flags)
++            sm = sp.search(content)
++            if sm:
++                em = ep.search(content, sm.end())
++                if em:
++                    include = bool(op.get("include_markers", False))
++                    if include:
++                        start_idx = sm.start()
++                        end_idx = em.end()
++                    else:
++                        start_idx = sm.end()
++                        end_idx = em.start()
++                    content = content[:start_idx] + op.get("text","") + content[end_idx:]
++                    changed = True
++        else:
++            print(f"ERROR: unsupported action '{action}'", file=sys.stderr)
++            return 1
++
++    if not changed:
++        # No changes made
++        return 2
++
++    # Write atomically
++    d = os.path.dirname(path) or "."
++    fd, tmp = tempfile.mkstemp(prefix=".apply_edits.", dir=d, text=True)
++    with os.fdopen(fd, "w", encoding="utf-8") as f:
++        f.write(content)
++    try:
++        shutil.copystat(path, tmp, follow_symlinks=True)
++    except Exception:
++        pass
++    os.replace(tmp, path)
++    return 0
++
++if __name__ == "__main__":
++    sys.exit(main())

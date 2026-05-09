@@ -1,0 +1,92 @@
+diff --git a/TASK_DESCRIPTION_PATH b/TASK_DESCRIPTION_PATH
+new file mode 100644
+index 0000000000..386b28e6ff
+--- /dev/null
++++ b/TASK_DESCRIPTION_PATH
+@@ -0,0 +1,22 @@
++call_command fails when argument of required mutually exclusive group is passed in kwargs.
++Description
++	
++This error 
++django.core.management.base.CommandError: Error: one of the arguments --shop-id --shop is required
++is raised when I run 
++call_command('my_command', shop_id=1)
++the argument 'shop_id' is part of a required mutually exclusive group:
++shop = parser.add_mutually_exclusive_group(required=True)
++shop.add_argument('--shop-id', nargs='?', type=int, default=None, dest='shop_id')
++shop.add_argument('--shop', nargs='?', type=str, default=None, dest='shop_name')
++However, everything is fine when I call this command in this way:
++call_command('my_command, '--shop-id=1')
++In django sources I found that only those keyword arguments of call_command are passed to the parser that are defined as required:
++# Any required arguments which are passed in via '**options' must be passed
++# to parse_args().
++parse_args += [
++	'{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
++	for opt in parser._actions if opt.required and opt.dest in options
++]
++but in this special case both of them individually are not required, they are actually part of a group that is required. And the code of call_command does nothing with groups defined in the parser.
++
+diff --git a/django/core/management/__init__.py b/django/core/management/__init__.py
+index 5f2e64761e..dde4036b30 100644
+--- a/django/core/management/__init__.py
++++ b/django/core/management/__init__.py
+@@ -129,12 +129,37 @@ def call_command(command_name, *args, **options):
+             else:
+                 yield opt
+ 
++    def get_parsers(parser):
++        # Yield parser and any subparsers recursively.
++        yield parser
++        for opt in parser._actions:
++            if isinstance(opt, _SubParsersAction):
++                for sub_opt in opt.choices.values():
++                    yield from get_parsers(sub_opt)
++
++    def get_required_group_dests(parser):
++        # Collect dests of actions that are members of any required mutually
++        # exclusive group across this parser and all subparsers.
++        required_dests = set()
++        for p in get_parsers(parser):
++            for group in getattr(p, '_mutually_exclusive_groups', ()):
++                if getattr(group, 'required', False):
++                    for act in getattr(group, '_group_actions', ()):
++                        if getattr(act, 'dest', None):
++                            required_dests.add(act.dest)
++        return required_dests
++
+     parser_actions = list(get_actions(parser))
+     # Any required arguments which are passed in via **options must be passed
+     # to parse_args().
++    # Any required arguments which are passed in via **options must be passed
++    # to parse_args(). Also include options that are part of any required
++    # mutually exclusive group.
++    required_group_dests = get_required_group_dests(parser)
+     parse_args += [
+         '{}={}'.format(min(opt.option_strings), arg_options[opt.dest])
+-        for opt in parser_actions if opt.required and opt.dest in options
++        for opt in parser_actions
++        if (opt.required or opt.dest in required_group_dests) and opt.dest in options
+     ]
+     defaults = parser.parse_args(args=parse_args)
+     defaults = dict(defaults._get_kwargs(), **arg_options)
+@@ -390,4 +415,4 @@ class ManagementUtility:
+ def execute_from_command_line(argv=None):
+     """Run a ManagementUtility."""
+     utility = ManagementUtility(argv)
+-    utility.execute()
++    utility.execute()
+\ No newline at end of file
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..39559d4d02
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,8 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++
++- When modifying management command parsing, remember to account for required mutually exclusive groups across subparsers.
++- Prefer writing a small Python patch tool that locates anchors deterministically rather than brittle regex.
++- After patching, create a minimal inline verification using a dummy BaseCommand and call_command to validate both kwargs and args flows.

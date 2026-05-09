@@ -1,0 +1,200 @@
+diff --git a/TASK_DESCRIPTION_PATH b/TASK_DESCRIPTION_PATH
+new file mode 100644
+index 0000000000..fadf998fb6
+--- /dev/null
++++ b/TASK_DESCRIPTION_PATH
+@@ -0,0 +1,47 @@
++has_key, has_keys, and has_any_keys JSONField() lookups don't handle numeric keys on SQLite, MySQL, and Oracle.
++Description
++	 
++		(last modified by TheTerrasque)
++	 
++Problem
++When using models.​JSONField() ​has_key lookup with numerical keys on SQLite database it fails to find the keys.
++Versions:
++Django: 4.0.3
++Python: 3.9.6 (tags/v3.9.6:db3ff76, Jun 28 2021, 15:26:21) [MSC v.1929 64 bit (AMD64)] on win32
++sqlite3.version: '2.6.0'
++sqlite3.sqlite_version: '3.35.5'
++Example:
++Database
++DATABASES = {
++	'default': {
++		'ENGINE': 'django.db.backends.sqlite3',
++		'NAME': 'db.sqlite3',
++	}
++}
++Model
++class JsonFieldHasKeyTest(models.Model):
++	data = models.JSONField()
++Test
++from django.test import TestCase
++from .models import JsonFieldHasKeyTest
++class JsonFieldHasKeyTestCase(TestCase):
++	def setUp(self) -> None:
++		test = JsonFieldHasKeyTest(data={'foo': 'bar'})
++		test2 = JsonFieldHasKeyTest(data={'1111': 'bar'})
++		test.save()
++		test2.save()
++	def test_json_field_has_key(self):
++		c1 = JsonFieldHasKeyTest.objects.filter(data__has_key='foo').count()
++		c2 = JsonFieldHasKeyTest.objects.filter(data__has_key='1111').count()
++		self.assertEqual(c1, 1, Should have found 1 entry with key foo)
++		self.assertEqual(c2, 1, Should have found 1 entry with key 1111)
++Result
++FAIL: test_json_field_has_key (markers.tests.JsonFieldHasKeyTestCase)
++----------------------------------------------------------------------
++Traceback (most recent call last):
++ File H:FilesProjectsElectacoWebserviceelecservemarkerstests.py, line 16, in test_json_field_has_key	 
++	self.assertEqual(c2, 1, Should have found 1 entry with key 1111)
++AssertionError: 0 != 1 : Should have found 1 entry with key '1111'
++Additional info
++This has been tested on SQLite and Postgresql backend, it works on postgresql but fails on sqlite.
++
+diff --git a/django/db/models/fields/json.py b/django/db/models/fields/json.py
+index fdca700c9d..61eeec983c 100644
+--- a/django/db/models/fields/json.py
++++ b/django/db/models/fields/json.py
+@@ -191,15 +191,21 @@ class HasKeyLookup(PostgresOperatorLookup):
+         for key in rhs:
+             if isinstance(key, KeyTransform):
+                 *_, rhs_key_transforms = key.preprocess_lhs(compiler, connection)
+-            else:
+-                rhs_key_transforms = [key]
+-            rhs_params.append(
+-                "%s%s"
+-                % (
++                rhs_path = "%s%s" % (
+                     lhs_json_path,
+                     compile_json_path(rhs_key_transforms, include_root=False),
+                 )
+-            )
++            else:
++                if isinstance(self.lhs, KeyTransform):
++                    # Nested context: preserve numeric-like keys as array indices.
++                    rhs_path = "%s%s" % (
++                        lhs_json_path,
++                        compile_json_path([key], include_root=False),
++                    )
++                else:
++                    # Top-level has_key on the JSONField: treat numeric-like keys as strings.
++                    rhs_path = "%s.%s" % (lhs_json_path, json.dumps(str(key)))
++            rhs_params.append(rhs_path)
+         # Add condition for each key.
+         if self.logical_operator:
+             sql = "(%s)" % self.logical_operator.join([sql] * len(rhs_params))
+@@ -231,7 +237,6 @@ class HasKeyLookup(PostgresOperatorLookup):
+             compiler, connection, template="JSON_TYPE(%s, %%s) IS NOT NULL"
+         )
+ 
+-
+ class HasKey(HasKeyLookup):
+     lookup_name = "has_key"
+     postgres_operator = "?"
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..cdc479bc9f
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,14 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++
++
++# Added for JSONField lookup debugging and backend consistency
++- Before coding, grep the codebase for JSONField lookups: has_key, has_keys, has_any_keys, and backend-specific implementations (SQLite, MySQL, Oracle).
++- Identify where lookups compile to SQL/JSON path ops and ensure numeric dict keys are treated as strings (quoted) for backends that coerce to numbers.
++- Run focused tests only for JSONField lookups to reproduce quickly (e.g., Django tests under tests/model_fields/test_jsonfield or lookups tests).
++- Consider adding backend-specific casts or quoting strategies without breaking PostgreSQL behavior.
++- Use tools/ed.py to perform targeted edits (regex replace/insert) to keep changes controlled and reproducible.
++- Re-run the minimal subset of tests after each change; iterate until both string and numeric keys pass.
++- Validate has_key, has_keys, and has_any_keys across SQLite, MySQL, and Oracle paths; avoid changes that rely on Postgres-only features.
+diff --git a/tools/ed.py b/tools/ed.py
+new file mode 100755
+index 0000000000..84f9694a39
+--- /dev/null
++++ b/tools/ed.py
+@@ -0,0 +1,81 @@
++#!/usr/bin/env python3
++import sys
++import re
++
++USAGE = """Usage:
++  ed.py FILE replace_regex PATTERN REPLACEMENT [COUNT]
++  ed.py FILE insert_after LINE_REGEX INSERTION
++  ed.py FILE insert_before LINE_REGEX INSERTION
++Examples:
++  ed.py path/to/file.py replace_regex "(foo)\\s*=\\s*(bar)" "\\1 = baz" 1
++  ed.py path/to/file.py insert_after "^class MyClass" "\\n    NEW_LINE\\n"
++"""
++
++def replace_regex(file_path, pattern, replacement, count):
++    flags = re.MULTILINE | re.DOTALL
++    rx = re.compile(pattern, flags)
++    with open(file_path, "r", encoding="utf-8") as f:
++        s = f.read()
++    new, n = rx.subn(replacement, s, count if count > 0 else 0)
++    if n == 0:
++        print(f"[ed.py] No matches for pattern in {file_path}", file=sys.stderr)
++        sys.exit(1)
++    with open(file_path, "w", encoding="utf-8") as f:
++        f.write(new)
++    print(f"[ed.py] Replaced {n} occurrence(s) in {file_path}")
++
++def insert_line(file_path, line_regex, insertion, before=False):
++    rx = re.compile(line_regex)
++    with open(file_path, "r", encoding="utf-8") as f:
++        lines = f.read().splitlines(keepends=True)
++    idx = None
++    for i, line in enumerate(lines):
++        if rx.search(line):
++            idx = i
++            break
++    if idx is None:
++        print(f"[ed.py] Pattern not found: {line_regex}", file=sys.stderr)
++        sys.exit(1)
++    insert_at = idx if before else idx + 1
++    lines.insert(insert_at, insertion)
++    with open(file_path, "w", encoding="utf-8") as f:
++        f.writelines(lines)
++    print(f"[ed.py] Inserted {'before' if before else 'after'} line {idx+1} in {file_path}")
++
++def main():
++    if len(sys.argv) < 5:
++        print(USAGE, file=sys.stderr)
++        sys.exit(2)
++    file_path = sys.argv[1]
++    action = sys.argv[2]
++    if action == "replace_regex":
++        if len(sys.argv) < 5:
++            print(USAGE, file=sys.stderr)
++            sys.exit(2)
++        pattern = sys.argv[3]
++        replacement = sys.argv[4]
++        try:
++            count = int(sys.argv[5])
++        except (IndexError, ValueError):
++            count = 0
++        replace_regex(file_path, pattern, replacement, count)
++    elif action == "insert_after":
++        if len(sys.argv) < 5:
++            print(USAGE, file=sys.stderr)
++            sys.exit(2)
++        line_regex = sys.argv[3]
++        insertion = sys.argv[4]
++        insert_line(file_path, line_regex, insertion, before=False)
++    elif action == "insert_before":
++        if len(sys.argv) < 5:
++            print(USAGE, file=sys.stderr)
++            sys.exit(2)
++        line_regex = sys.argv[3]
++        insertion = sys.argv[4]
++        insert_line(file_path, line_regex, insertion, before=True)
++    else:
++        print(USAGE, file=sys.stderr)
++        sys.exit(2)
++
++if __name__ == "__main__":
++    main()

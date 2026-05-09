@@ -1,0 +1,166 @@
+diff --git a/django/db/models/base.py b/django/db/models/base.py
+index 4038859cfa..e8a2d20894 100644
+--- a/django/db/models/base.py
++++ b/django/db/models/base.py
+@@ -1297,6 +1297,13 @@ class Model(metaclass=ModelBase):
+ 
+     @classmethod
+     def _check_default_pk(cls):
++        from django.db.models import AutoField
++        pk_field = cls._meta.pk
++        is_parent_link = getattr(getattr(pk_field, 'remote_field', None), 'parent_link', False) or getattr(pk_field, 'parent_link', False)
++        # If the PK is auto-created but not an AutoField (e.g., parent link in multi-table inheritance), do not warn.
++        if pk_field.auto_created and (not isinstance(pk_field, AutoField) or is_parent_link):
++            return []
++
+         if (
+             cls._meta.pk.auto_created and
+             not settings.is_overridden('DEFAULT_AUTO_FIELD') and
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..074b30a218
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,11 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task, if you have learned any additional information about the task that should be added to the task description, or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Note that the task description can be changed by modifying the task_description.txt file directly. Anytime you execute commands that provide insight into the issue you are solving, you MUST add these insights to the task description before proceeding!
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++
++[Workflow Enhancements]
++- Before modifying code, locate W042 check implementation and understand how it determines auto-created PK vs inherited PK.
++- Prefer targeted tests (grep for tests referencing W042) to validate changes quickly.
++- Ensure changes do not alter expected warnings for truly auto-created PKs; only suppress for subclasses inheriting an explicit PK from a parent.
++- After each discovery (grep, reading files), append findings to task_description.txt.
+diff --git a/scripts/dev_edit.py b/scripts/dev_edit.py
+new file mode 100755
+index 0000000000..c265010003
+--- /dev/null
++++ b/scripts/dev_edit.py
+@@ -0,0 +1,72 @@
++#!/usr/bin/env python3
++import sys, re, pathlib
++
++USAGE = """Usage:
++  dev_edit.py replace <file> <pattern> <replacement>
++  dev_edit.py insert_after <file> <anchor_pattern> <text>
++  dev_edit.py insert_before <file> <anchor_pattern> <text>
++  dev_edit.py show <file> [pattern]
++"""
++
++def load(p): return pathlib.Path(p).read_text(encoding="utf-8")
++def save(p, s): pathlib.Path(p).write_text(s, encoding="utf-8")
++
++def replace(fp, pat, repl):
++    s = load(fp)
++    new, n = re.subn(pat, repl, s, flags=re.M|re.S)
++    if not n:
++        print(f"[dev_edit] No matches for pattern in {fp}", file=sys.stderr)
++        sys.exit(1)
++    save(fp, new)
++    print(f"[dev_edit] Replaced {n} occurrence(s) in {fp}")
++
++def insert_after(fp, anchor, text):
++    s = load(fp)
++    m = re.search(anchor, s, flags=re.M|re.S)
++    if not m:
++        print(f"[dev_edit] Anchor not found in {fp}", file=sys.stderr)
++        sys.exit(1)
++    idx = m.end()
++    new = s[:idx] + text + s[idx:]
++    save(fp, new)
++    print(f"[dev_edit] Inserted after anchor in {fp}")
++
++def insert_before(fp, anchor, text):
++    s = load(fp)
++    m = re.search(anchor, s, flags=re.M|re.S)
++    if not m:
++        print(f"[dev_edit] Anchor not found in {fp}", file=sys.stderr)
++        sys.exit(1)
++    idx = m.start()
++    new = s[:idx] + text + s[idx:]
++    save(fp, new)
++    print(f"[dev_edit] Inserted before anchor in {fp}")
++
++def show(fp, pat=None):
++    s = load(fp)
++    if not pat:
++        print(s); return
++    for i, line in enumerate(s.splitlines(), 1):
++        if re.search(pat, line):
++            start = max(1, i-3); end = i+3
++            chunk = "\n".join(f"{n:5d}: {l}" for n,l in enumerate(s.splitlines(),1)[start-1:end])
++            print(chunk)
++            print("-"*60)
++
++def main():
++    if len(sys.argv) < 3:
++        print(USAGE, file=sys.stderr); sys.exit(2)
++    cmd = sys.argv[1]
++    if cmd == "replace" and len(sys.argv) == 5:
++        replace(sys.argv[2], sys.argv[3], sys.argv[4])
++    elif cmd == "insert_after" and len(sys.argv) == 5:
++        insert_after(sys.argv[2], sys.argv[3], sys.argv[4])
++    elif cmd == "insert_before" and len(sys.argv) == 5:
++        insert_before(sys.argv[2], sys.argv[3], sys.argv[4])
++    elif cmd == "show":
++        show(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
++    else:
++        print(USAGE, file=sys.stderr); sys.exit(2)
++
++if __name__ == "__main__":
++    main()
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 0000000000..a476f97366
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,47 @@
++models.W042 is raised on inherited manually specified primary key.
++Description
++	
++I have models which inherit from other models, and they should inherit the primary key. This works fine with Django 3.1. However, if I install Django 3.2 alpha, when I run make_migrations I get the following error messages:
++System check identified some issues:
++WARNINGS:
++accounts.ReservedUsername: (models.W042) Auto-created primary key used when not defining a primary key type, by default 'django.db.models.AutoField'.
++		HINT: Configure the DEFAULT_AUTO_FIELD setting or the SpeedyCoreAccountsConfig.default_auto_field attribute to point to a subclass of AutoField, e.g. 'django.db.models.BigAutoField'.
++accounts.User: (models.W042) Auto-created primary key used when not defining a primary key type, by default 'django.db.models.AutoField'.
++		HINT: Configure the DEFAULT_AUTO_FIELD setting or the SpeedyCoreAccountsConfig.default_auto_field attribute to point to a subclass of AutoField, e.g. 'django.db.models.BigAutoField'.
++blocks.Block: (models.W042) Auto-created primary key used when not defining a primary key type, by default 'django.db.models.AutoField'.
++		HINT: Configure the DEFAULT_AUTO_FIELD setting or the AppConfig.default_auto_field attribute to point to a subclass of AutoField, e.g. 'django.db.models.BigAutoField'.
++contact_by_form.Feedback: (models.W042) Auto-created primary key used when not defining a primary key type, by default 'django.db.models.AutoField'.
++		HINT: Configure the DEFAULT_AUTO_FIELD setting or the SpeedyCoreContactByFormConfig.default_auto_field attribute to point to a subclass of AutoField, e.g. 'django.db.models.BigAutoField'.
++core_messages.ReadMark: (models.W042) Auto-created primary key used when not defining a primary key type, by default 'django.db.models.AutoField'.
++		HINT: Configure the DEFAULT_AUTO_FIELD setting or the SpeedyCoreMessagesConfig.default_auto_field attribute to point to a subclass of AutoField, e.g. 'django.db.models.BigAutoField'.
++friendship.Block: (models.W042) Auto-created primary key used when not defining a primary key type, by default 'django.db.models.AutoField'.
++		HINT: Configure the DEFAULT_AUTO_FIELD setting or the AppConfig.default_auto_field attribute to point to a subclass of AutoField, e.g. 'django.db.models.BigAutoField'.
++friendship.Follow: (models.W042) Auto-created primary key used when not defining a primary key type, by default 'django.db.models.AutoField'.
++		HINT: Configure the DEFAULT_AUTO_FIELD setting or the AppConfig.default_auto_field attribute to point to a subclass of AutoField, e.g. 'django.db.models.BigAutoField'.
++friendship.Friend: (models.W042) Auto-created primary key used when not defining a primary key type, by default 'django.db.models.AutoField'.
++		HINT: Configure the DEFAULT_AUTO_FIELD setting or the AppConfig.default_auto_field attribute to point to a subclass of AutoField, e.g. 'django.db.models.BigAutoField'.
++friendship.FriendshipRequest: (models.W042) Auto-created primary key used when not defining a primary key type, by default 'django.db.models.AutoField'.
++		HINT: Configure the DEFAULT_AUTO_FIELD setting or the AppConfig.default_auto_field attribute to point to a subclass of AutoField, e.g. 'django.db.models.BigAutoField'.
++likes.UserLike: (models.W042) Auto-created primary key used when not defining a primary key type, by default 'django.db.models.AutoField'.
++		HINT: Configure the DEFAULT_AUTO_FIELD setting or the AppConfig.default_auto_field attribute to point to a subclass of AutoField, e.g. 'django.db.models.BigAutoField'.
++uploads.Image: (models.W042) Auto-created primary key used when not defining a primary key type, by default 'django.db.models.AutoField'.
++		HINT: Configure the DEFAULT_AUTO_FIELD setting or the AppConfig.default_auto_field attribute to point to a subclass of AutoField, e.g. 'django.db.models.BigAutoField'.
++These models should not use auto-created primary keys! I already defined the primary key in the ancestor of the model. For example class Entity which class User inherits from. It looks to me like a bug in Django 3.2 alpha.
++
++
++[Update 1 - Repo Insight]
++- This task is patching Django core (django/ directory present). The issue relates to system check models.W042 raised for inherited manually specified primary keys when using Django 3.2 DEFAULT_AUTO_FIELD logic.
++- Likely areas: django/core/checks/models.py (system checks), django/db/models/options.py (Meta pk resolution), or fields/auto.py handling of default PKs.
++
++[Update 2 - Root Cause]
++- W042 is raised in Model._check_default_pk based solely on pk.auto_created.
++- In multi-table inheritance, the child pk is an auto-created OneToOneField (parent_link=True) to the parent pk; this should not trigger W042 because the pk type is explicitly set on the parent.
++- Fix: Only warn when the auto-created pk is an AutoField (or subclass) and not a parent_link field.
++
++[Update 2 - Root Cause and Fix Plan]
++- W042 generated in django/db/models/base.py::_check_default_pk based only on pk.auto_created.
++- For multi-table inheritance, child pk is an auto-created OneToOneField (parent_link=True), not an AutoField; warning is a false positive.
++- Fix: In _check_default_pk, skip warning if pk is auto-created but not an AutoField or if it is a parent_link.
++
++[Verification]
++- Ran tests: check_framework suite passed after the fix (W042 logic unaffected for valid cases).

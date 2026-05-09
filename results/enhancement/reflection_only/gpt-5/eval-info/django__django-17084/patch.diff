@@ -1,0 +1,211 @@
+diff --git a/TASK_DESCRIPTION_PATH b/TASK_DESCRIPTION_PATH
+new file mode 100644
+index 0000000000..76f2055a91
+--- /dev/null
++++ b/TASK_DESCRIPTION_PATH
+@@ -0,0 +1,19 @@
++Cannot use aggregate over window functions since 4.2
++Description
++	 
++		(last modified by younes-chaoui)
++	 
++After upgrading to Django 4.2, I encountered an exception when executing ORM queries that involve aggregates over Window functions. The specific error was psycopg2.errors.GroupingError: aggregate function calls cannot contain window function calls
++Dependencies :
++psycopg2 version: 2.9.3
++django version: 4.2.3
++PostgreSQL version: 13.4
++Example Code:
++queryset = queryset.annotate(
++	cumul_DJR=Coalesce(Window(Sum(DJR), order_by=F(date).asc()), 0.0)
++)
++aggregate = queryset.aggregate(
++	DJR_total=Sum(DJR),
++	cumul_DJR_total=Sum(cumul_DJR)
++)
++
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index 13a6809dd8..453d6e1f7a 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -425,6 +425,42 @@ class Query(BaseExpression):
+         # Stash resolved aggregates now that they have been allowed to resolve
+         # against each other.
+         aggregates = {alias: self.annotations.pop(alias) for alias in aggregate_exprs}
++
++        # Detect if requested aggregates reference window expressions to avoid
++        # generating aggregate(window(...)) in a single SELECT (unsupported on
++        # some backends such as PostgreSQL). In that case, a subquery is
++        # required: the inner query computes windowed annotations, the outer
++        # query aggregates on them.
++        def _expr_contains_over(expr):
++            if getattr(expr, "contains_over_clause", False):
++                return True
++            get_src = getattr(expr, "get_source_expressions", None)
++            if get_src:
++                for e in get_src():
++                    if _expr_contains_over(e):
++                        return True
++            return False
++
++        refs_window = False
++        for _agg in aggregates.values():
++            # Check referenced annotations for window usage.
++            refs = set()
++            if hasattr(_agg, "get_refs"):
++                try:
++                    refs = _agg.get_refs()
++                except Exception:
++                    refs = set()
++            for _ref in refs:
++                _annot = self.annotations.get(_ref)
++                if _annot is not None and _expr_contains_over(_annot):
++                    refs_window = True
++                    break
++            else:
++                # Also check the aggregate expression itself for window usage.
++                if _expr_contains_over(_agg):
++                    refs_window = True
++            if refs_window:
++                break
+         self.set_annotation_mask(annotation_select_mask)
+         # Existing usage of aggregation can be determined by the presence of
+         # selected aggregates but also by filters against aliased aggregates.
+@@ -453,6 +489,7 @@ class Query(BaseExpression):
+             or refs_subquery
+             or qualify
+             or self.distinct
++            or refs_window
+             or self.combinator
+         ):
+             from django.db.models.sql.subqueries import AggregateQuery
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..c03fd35a25
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,48 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
++---
++Additions for handling "aggregates over window functions" issue (Django 4.2+):
++
++1) Targeted code search
++- Inspect these areas first:
++  - django/db/models/aggregates.py (Aggregate, Sum, etc.)
++  - django/db/models/expressions.py (Window, Func, Expression, resolve_expression)
++  - django/db/models/sql/query.py (Query.aggregate(), get_aggregation(), chain behavior)
++  - django/db/models/sql/compiler.py (SQLCompiler, select/aggregate compilation)
++  - django/db/backends/postgresql/* (any PG-specific handling of window/aggregate)
++- Grep for keywords: "Window(", "OVER", "aggregate(", "get_aggregation", "annotation", "subquery", "contains_aggregate", "contains_over_clause", "window_frame".
++
++2) Likely fix strategy
++- PostgreSQL forbids aggregate(function(window(...))) in a single SELECT.
++- If an Aggregate references a Window expression (directly or via annotated field), compile the query as:
++  - Inner subquery: compute the windowed annotation (e.g., cumul := SUM(DJR) OVER (ORDER BY date)).
++  - Outer query: apply the aggregate over the annotated column (e.g., SELECT SUM(cumul) FROM (SELECT ...) sub).
++- This can be implemented by modifying aggregation code paths:
++  - Detect windowed expressions within requested aggregates in Query.get_aggregation() or earlier resolve steps.
++  - If detected, force a subquery: clone the Query that produces the annotations as a subquery and move the aggregate to an outer query.
++  - Ensure aliasing preserves column references (Selected annotations must appear in inner SELECT).
++
++3) Validation steps
++- Reproduce with a minimal script: annotate(Window(Sum("DJR"), order_by=F("date").asc())) then aggregate(Sum("cumul_DJR")).
++- Run relevant test modules (expressions, annotations, aggregates, window tests). Ensure no regressions for other backends.
++- Confirm SQL generation: no aggregate calls wrapping OVER clauses in a single SELECT for PostgreSQL.
++
++4) Tools to create now
++- A simple "search.py" helper to quickly grep code with context while ignoring tests.
++- A small "edit.py" tool to perform targeted, idempotent file edits (insert after pattern, replace blocks by markers, or patch functions by name).
++- Consider a "reproduce.py" script to quickly run/print SQL for the failing pattern without DB connection (use queryset.query.sql_with_params on PostgreSQL vendor if possible).
++
++5) Safety and generality
++- Keep fix backend-agnostic where possible; if PG-specific, guard with backend features/capabilities checks.
++- Avoid modifying tests and config; only change code under /django.
++- Document with inline comments: WHY a subquery is forced when windowed expressions appear in aggregates.
++
++6) Workflow reminders
++- Always search before editing.
++- Make small, testable changes; rerun minimal reproducer often.
++- If touching core compilation, check both annotate() + aggregate() and pure aggregate() paths.
++- Add feature detection methods like "expression.contains_over_clause()" if missing, to make detection robust.
++
++---
+diff --git a/tools/search.py b/tools/search.py
+new file mode 100644
+index 0000000000..16b7bdcbff
+--- /dev/null
++++ b/tools/search.py
+@@ -0,0 +1,71 @@
++#!/usr/bin/env python3
++import os
++import re
++import sys
++import argparse
++from pathlib import Path
++
++IGNORE_DIRS = {'.git', 'tests', 'js_tests', 'Django.egg-info', 'extras', 'node_modules', '.tox', '.venv', 'build', 'dist', '__pycache__'}
++
++def should_skip_dir(path: Path) -> bool:
++    parts = set(path.parts)
++    return any(p in IGNORE_DIRS for p in parts)
++
++def iter_files(root: Path, exts=None):
++    for dirpath, dirnames, filenames in os.walk(root):
++        dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS]
++        if should_skip_dir(Path(dirpath)):
++            continue
++        for f in filenames:
++            if exts:
++                if not any(f.endswith(e) for e in exts):
++                    continue
++            yield Path(dirpath) / f
++
++def print_match(path, lineno, line, color=False):
++    if color:
++        print(f"\033[36m{path}\033[0m:\033[33m{lineno}\033[0m: {line.rstrip()}")
++    else:
++        print(f"{path}:{lineno}: {line.rstrip()}")
++
++def main():
++    ap = argparse.ArgumentParser(description="Recursive code search with ignore rules.")
++    ap.add_argument("pattern", help="Regex pattern to search for")
++    ap.add_argument("-i", "--ignore-case", action="store_true")
++    ap.add_argument("-c", "--color", action="store_true")
++    ap.add_argument("-r", "--root", default=".", help="Root directory to search")
++    ap.add_argument("-e", "--ext", action="append", help="File extensions to include (e.g., -e .py -e .txt)")
++    ap.add_argument("--context", type=int, default=0, help="Print N lines of context")
++    args = ap.parse_args()
++
++    flags = re.MULTILINE
++    if args.ignore_case:
++        flags |= re.IGNORECASE
++    try:
++        rx = re.compile(args.pattern, flags)
++    except re.error as e:
++        print(f"Invalid regex: {e}", file=sys.stderr)
++        sys.exit(2)
++
++    root = Path(args.root)
++    for path in iter_files(root, exts=args.ext or [".py", ".rst", ".md", ".txt"]):
++        try:
++            with open(path, "r", encoding="utf-8", errors="ignore") as fh:
++                lines = fh.readlines()
++        except Exception:
++            continue
++        for i, line in enumerate(lines, 1):
++            if rx.search(line):
++                if args.context:
++                    start = max(1, i - args.context)
++                    end = min(len(lines), i + args.context)
++                    print_match(path, i, line, color=args.color)
++                    for j in range(start, end + 1):
++                        prefix = ">" if j == i else " "
++                        print(f"{prefix}{j:6}: {lines[j-1].rstrip()}")
++                else:
++                    print_match(path, i, line, color=args.color)
++    return 0
++
++if __name__ == "__main__":
++    raise SystemExit(main())
