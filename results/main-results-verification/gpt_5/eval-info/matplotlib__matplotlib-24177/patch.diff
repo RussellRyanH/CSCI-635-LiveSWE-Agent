@@ -1,0 +1,218 @@
+diff --git a/lib/matplotlib/axes/_axes.py b/lib/matplotlib/axes/_axes.py
+index 2412f815cd..716c643c5b 100644
+--- a/lib/matplotlib/axes/_axes.py
++++ b/lib/matplotlib/axes/_axes.py
+@@ -6891,6 +6891,33 @@ such objects
+                         patch.sticky_edges.x.append(0)
+ 
+             # we return patches, so put it back in the expected order
++            
++            # Ensure autoscaling accounts for the histogram tops in step/stepfilled
++            # Fix for: density not auto-scaled when using histtype="step".
++            try:
++                centers = 0.5 * (bins[:-1] + bins[1:])
++                tops_arr = np.asarray(tops)
++                if tops_arr.ndim == 2 and tops_arr.shape[1] == centers.size:
++                    m_arr = np.nanmax(tops_arr, axis=0)
++                elif tops_arr.ndim == 1 and tops_arr.size == centers.size:
++                    m_arr = tops_arr
++                else:
++                    m_arr = None
++                if m_arr is not None:
++                    btm = bottom
++                    if not np.isscalar(btm):
++                        btm = np.asarray(btm)
++                        if btm.size != m_arr.size:
++                            btm = 0
++                    if orientation == "vertical":
++                        pts = np.column_stack([centers, m_arr + btm])
++                        self.update_datalim(pts, updatex=True, updatey=True)
++                    else:
++                        pts = np.column_stack([m_arr + btm, centers])
++                        self.update_datalim(pts, updatex=True, updatey=True)
++                    self._request_autoscale_view()
++            except Exception:
++                pass
+             patches.reverse()
+ 
+         # If None, make all labels None (via zip_longest below); otherwise,
+diff --git a/tmp/edit_file.py b/tmp/edit_file.py
+new file mode 100644
+index 0000000000..95270596e5
+--- /dev/null
++++ b/tmp/edit_file.py
+@@ -0,0 +1,43 @@
++#!/usr/bin/env python3
++import sys, re, io, os
++# A small tool to apply targeted text edits to a file via simple find/replace or insertions.
++# Usage patterns (provide one operation per run):
++# 1) Replace first occurrence: edit_file.py file --replace "old_text" "new_text"
++# 2) Insert after pattern (first match): edit_file.py file --insert-after "pattern" "to_insert"
++# 3) Insert before pattern (first match): edit_file.py file --insert-before "pattern" "to_insert"
++def main():
++    if len(sys.argv) < 4:
++        print("Usage: edit_file.py FILE (--replace|--insert-after|--insert-before) PATTERN TEXT", file=sys.stderr)
++        sys.exit(2)
++    path = sys.argv[1]
++    mode = sys.argv[2]
++    pat = sys.argv[3]
++    text = sys.argv[4] if len(sys.argv) > 4 else ""
++    with open(path, "r", encoding="utf-8") as f:
++        s = f.read()
++    if mode == "--replace":
++        if pat not in s:
++            print("Pattern not found for replace", file=sys.stderr)
++            sys.exit(3)
++        s = s.replace(pat, text, 1)
++    elif mode == "--insert-after":
++        idx = s.find(pat)
++        if idx < 0:
++            print("Pattern not found for insert-after", file=sys.stderr)
++            sys.exit(3)
++        idx_end = idx + len(pat)
++        s = s[:idx_end] + text + s[idx_end:]
++    elif mode == "--insert-before":
++        idx = s.find(pat)
++        if idx < 0:
++            print("Pattern not found for insert-before", file=sys.stderr)
++            sys.exit(3)
++        s = s[:idx] + text + s[idx:]
++    else:
++        print("Unknown mode", file=sys.stderr)
++        sys.exit(2)
++    with open(path, "w", encoding="utf-8") as f:
++        f.write(s)
++    print(f"Edited {path} with mode {mode}.")
++if __name__ == "__main__":
++    main()
+diff --git a/tmp/test_hist_autoscale.py b/tmp/test_hist_autoscale.py
+new file mode 100644
+index 0000000000..dadaee319b
+--- /dev/null
++++ b/tmp/test_hist_autoscale.py
+@@ -0,0 +1,21 @@
++import os, sys
++# Use local matplotlib from this repo
++sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib'))
++os.environ['MPLBACKEND'] = 'Agg'
++
++import numpy as np
++import matplotlib
++import matplotlib.pyplot as plt
++
++print("Matplotlib version:", matplotlib.__version__)
++scale = 1.2
++rng = np.random.default_rng(0)
++test_random = rng.standard_normal(100000) * scale
++
++fig, ax = plt.subplots(1, 2, figsize=(8, 4))
++ax[0].hist(test_random, bins=100, density=True, histtype="bar")
++ax[1].hist(test_random, bins=100, density=True, histtype="step")
++ylims_bar = ax[0].get_ylim()
++ylims_step = ax[1].get_ylim()
++print("bar ylim:", ylims_bar)
++print("step ylim:", ylims_step)
+diff --git a/tmp/test_hist_autoscale_inspect.py b/tmp/test_hist_autoscale_inspect.py
+new file mode 100644
+index 0000000000..674bf048d7
+--- /dev/null
++++ b/tmp/test_hist_autoscale_inspect.py
+@@ -0,0 +1,37 @@
++import os, sys
++sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib'))
++os.environ['MPLBACKEND'] = 'Agg'
++import numpy as np
++import matplotlib
++import matplotlib.pyplot as plt
++
++print("Matplotlib version:", matplotlib.__version__)
++scale = 1.2
++rng = np.random.default_rng(0)
++test_random = rng.standard_normal(100000) * scale
++
++fig, ax = plt.subplots(1, 2, figsize=(8, 4))
++n0, b0, p0 = ax[0].hist(test_random, bins=100, density=True, histtype="bar")
++n1, b1, p1 = ax[1].hist(test_random, bins=100, density=True, histtype="step")
++
++ylims_bar = ax[0].get_ylim()
++ylims_step = ax[1].get_ylim()
++print("bar ylim:", ylims_bar)
++print("step ylim:", ylims_step)
++
++# Inspect bar heights and max
++print("bar max density (from n0):", float(np.max(n0)))
++
++# For step, p1 is a list of Polygons (for nx==1)
++if isinstance(p1, list) and len(p1) > 0:
++    poly = p1[0]
++    path = poly.get_path().vertices
++    y_max_poly = float(np.max(path[:,1]))
++    y_min_poly = float(np.min(path[:,1]))
++    print("step polygon y range:", (y_min_poly, y_max_poly))
++else:
++    print("Unexpected step patch structure:", type(p1), p1)
++
++# Also compute expected theoretical peak for reference (normal approx)
++theory_peak = 1.0/(scale*np.sqrt(2*np.pi))
++print("theoretical peak ~", theory_peak)
+diff --git a/tmp/test_hist_various.py b/tmp/test_hist_various.py
+new file mode 100644
+index 0000000000..e55d073a5b
+--- /dev/null
++++ b/tmp/test_hist_various.py
+@@ -0,0 +1,55 @@
++import os, sys
++sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib'))
++os.environ['MPLBACKEND'] = 'Agg'
++import numpy as np
++import matplotlib
++import matplotlib.pyplot as plt
++
++print("Matplotlib version:", matplotlib.__version__)
++rng = np.random.default_rng(1)
++for scale in (1.0, 1.2, 2.0):
++    print("\nScale:", scale)
++    data = rng.standard_normal(100000) * scale
++
++    fig, ax = plt.subplots(2, 3, figsize=(10, 6))
++    # vertical, density
++    n_bar, b_bar, p_bar = ax[0,0].hist(data, bins=100, density=True, histtype="bar")
++    n_step, b_step, p_step = ax[0,1].hist(data, bins=100, density=True, histtype="step")
++    n_stepf, b_stepf, p_stepf = ax[0,2].hist(data, bins=100, density=True, histtype="stepfilled")
++    print("vertical density:")
++    print("  bar ylim:", ax[0,0].get_ylim(), "max n:", float(np.max(n_bar)))
++    print("  step ylim:", ax[0,1].get_ylim(), "poly ymax:", float(np.max(p_step[0].get_path().vertices[:,1])))
++    print("  stepfilled ylim:", ax[0,2].get_ylim(), "poly ymax:", float(np.max(p_stepf[0].get_path().vertices[:,1])))
++
++    # vertical, counts (density=False)
++    n_bar_c, b_bar_c, p_bar_c = ax[1,0].hist(data, bins=100, density=False, histtype="bar")
++    n_step_c, b_step_c, p_step_c = ax[1,1].hist(data, bins=100, density=False, histtype="step")
++    n_stepf_c, b_stepf_c, p_stepf_c = ax[1,2].hist(data, bins=100, density=False, histtype="stepfilled")
++    print("vertical counts:")
++    print("  bar ylim:", ax[1,0].get_ylim(), "max n:", float(np.max(n_bar_c)))
++    print("  step ylim:", ax[1,1].get_ylim(), "poly ymax:", float(np.max(p_step_c[0].get_path().vertices[:,1])))
++    print("  stepfilled ylim:", ax[1,2].get_ylim(), "poly ymax:", float(np.max(p_stepf_c[0].get_path().vertices[:,1])))
++
++    plt.close(fig)
++
++    # horizontal, density
++    fig2, ax2 = plt.subplots(1, 2, figsize=(8, 3))
++    n_bar_h, b_bar_h, p_bar_h = ax2[0].hist(data, bins=100, density=True, histtype="bar", orientation='horizontal')
++    n_step_h, b_step_h, p_step_h = ax2[1].hist(data, bins=100, density=True, histtype="step", orientation='horizontal')
++    print("horizontal density:")
++    print("  bar xlim:", ax2[0].get_xlim(), "max n:", float(np.max(n_bar_h)))
++    # For horizontal, polygon x is "counts"
++    print("  step xlim:", ax2[1].get_xlim(), "poly xmax:", float(np.max(p_step_h[0].get_path().vertices[:,0])))
++    plt.close(fig2)
++
++print("\nStacked density (two datasets):")
++d1 = rng.standard_normal(50000)
++d2 = rng.standard_normal(50000) * 0.5 + 1.0
++fig3, ax3 = plt.subplots(1, 2, figsize=(8, 3))
++n_s_bar, b_s_bar, p_s_bar = ax3[0].hist([d1, d2], bins=80, density=True, histtype='barstacked', stacked=True)
++n_s_step, b_s_step, p_s_step = ax3[1].hist([d1, d2], bins=80, density=True, histtype='step', stacked=True)
++print("  barstacked ylim:", ax3[0].get_ylim(), "bar max:", float(np.max(n_s_bar if isinstance(n_s_bar, np.ndarray) else np.max(np.array(n_s_bar)))))
++# For step stacked, p_s_step is list[list[Polygon]]; take top of stack (last dataset) polygon
++poly_top = p_s_step[-1][0] if isinstance(p_s_step[-1], list) else p_s_step[-1]
++print("  step stacked ylim:", ax3[1].get_ylim(), "poly ymax:", float(np.max(poly_top.get_path().vertices[:,1])))
++plt.close(fig3)

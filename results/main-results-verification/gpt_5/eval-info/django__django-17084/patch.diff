@@ -1,0 +1,108 @@
+diff --git a/django/db/models/sql/query.py b/django/db/models/sql/query.py
+index 13a6809dd8..9da225a728 100644
+--- a/django/db/models/sql/query.py
++++ b/django/db/models/sql/query.py
+@@ -403,6 +403,7 @@ class Query(BaseExpression):
+         # Store annotation mask prior to temporarily adding aggregations for
+         # resolving purpose to facilitate their subsequent removal.
+         refs_subquery = False
++        refs_window = False
+         replacements = {}
+         annotation_select_mask = self.annotation_select_mask
+         for alias, aggregate_expr in aggregate_exprs.items():
+@@ -410,6 +411,7 @@ class Query(BaseExpression):
+             aggregate = aggregate_expr.resolve_expression(
+                 self, allow_joins=True, reuse=None, summarize=True
+             )
++            aggr_contains_window |= getattr(aggregate, 'contains_over_clause', False)
+             if not aggregate.contains_aggregate:
+                 raise TypeError("%s is not an aggregate expression" % alias)
+             # Temporarily add aggregate to annotations to allow remaining
+@@ -419,6 +421,10 @@ class Query(BaseExpression):
+                 getattr(self.annotations[ref], "subquery", False)
+                 for ref in aggregate.get_refs()
+             )
++            refs_window |= any(
++                getattr(self.annotations.get(ref, None), "contains_over_clause", False)
++                for ref in aggregate.get_refs()
++            )
+             aggregate = aggregate.replace_expressions(replacements)
+             self.annotations[alias] = aggregate
+             replacements[Ref(alias, aggregate)] = aggregate
+@@ -451,6 +457,8 @@ class Query(BaseExpression):
+             or self.is_sliced
+             or has_existing_aggregation
+             or refs_subquery
++            or refs_window
++            or aggr_contains_window
+             or qualify
+             or self.distinct
+             or self.combinator
+@@ -497,8 +505,35 @@ class Query(BaseExpression):
+             # by the aggregates, explicitly selecting them in the inner query,
+             # and making sure the aggregates are repointed to them.
+             col_refs = {}
++            win_global_refs = {}
+             for alias, aggregate in aggregates.items():
+                 replacements = {}
++                # Collect and materialize any window expressions used inside the aggregate
++                def walk(expr, acc):
++                    if not getattr(expr, 'get_source_expressions', None):
++                        return
++                    for e in (expr.get_source_expressions() or []):
++                        if e is None:
++                            continue
++                        # Avoid descending into already-replaced Refs
++                        if e.__class__.__name__ == 'Ref':
++                            continue
++                        if getattr(e, 'contains_over_clause', False):
++                            acc[id(e)] = e
++                        walk(e, acc)
++                # win_refs removed; using win_global_refs
++                win_exprs = {}
++                walk(aggregate, win_exprs)
++                for _eid, we in win_exprs.items():
++                    # If the window expression is already materialized, reuse; else add annotation.
++                    if _eid not in win_global_refs:
++                        index = len(col_refs) + len(win_global_refs) + 1
++                        w_alias = f"__col{index}"
++                        w_ref = Ref(w_alias, we)
++                        win_global_refs[_eid] = w_ref
++                        inner_query.annotations[w_alias] = we
++                        inner_query.append_annotation_mask([w_alias])
++                    replacements[we] = win_global_refs[_eid]
+                 for col in self._gen_cols([aggregate], resolve_refs=False):
+                     if not (col_ref := col_refs.get(col)):
+                         index = len(col_refs) + 1
+diff --git a/tools_patch_file.py b/tools_patch_file.py
+new file mode 100644
+index 0000000000..065bbc4e91
+--- /dev/null
++++ b/tools_patch_file.py
+@@ -0,0 +1,26 @@
++#!/usr/bin/env python3
++import sys, re, pathlib, json
++
++def main():
++    if len(sys.argv) < 2:
++        print("Usage: tools_patch_file.py <file>", file=sys.stderr)
++        sys.exit(1)
++    path = pathlib.Path(sys.argv[1])
++    content = path.read_text()
++    print(json.dumps({"original_len": len(content)}))
++    patches = sys.stdin.read()
++    # Expect JSON array of {"pattern": "...", "repl": "...", "count": 1}
++    ops = json.loads(patches)
++    for i, op in enumerate(ops, 1):
++        pat = op["pattern"]
++        repl = op["repl"]
++        count = op.get("count", 0)
++        new = re.sub(pat, repl, content, count=count, flags=re.MULTILINE|re.DOTALL)
++        changed = (new != content)
++        content = new
++        print(json.dumps({"patch_index": i, "changed": changed}))
++    path.write_text(content)
++    print(json.dumps({"final_len": len(content)}))
++
++if __name__ == "__main__":
++    main()

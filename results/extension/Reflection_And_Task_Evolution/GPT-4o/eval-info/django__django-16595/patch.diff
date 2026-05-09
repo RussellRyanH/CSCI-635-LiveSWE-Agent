@@ -1,0 +1,136 @@
+diff --git a/django/db/migrations/operations/fields.py b/django/db/migrations/operations/fields.py
+index cd3aab43ad..257a16d969 100644
+--- a/django/db/migrations/operations/fields.py
++++ b/django/db/migrations/operations/fields.py
+@@ -67,6 +67,9 @@ class FieldOperation(Operation):
+         )
+ 
+     def reduce(self, operation, app_label):
++        # Check if the current operation can be reduced with another AlterField
++        if isinstance(operation, AlterField) and self.is_same_field_operation(operation):
++            return [operation]
+         return super().reduce(operation, app_label) or not operation.references_field(
+             self.model_name, self.name, app_label
+         )
+@@ -148,6 +151,9 @@ class AddField(FieldOperation):
+                         field=self.field,
+                     ),
+                 ]
++        # Check if the current operation can be reduced with another AlterField
++        if isinstance(operation, AlterField) and self.is_same_field_operation(operation):
++            return [operation]
+         return super().reduce(operation, app_label)
+ 
+ 
+@@ -192,6 +198,9 @@ class RemoveField(FieldOperation):
+             and operation.name_lower == self.model_name_lower
+         ):
+             return [operation]
++        # Check if the current operation can be reduced with another AlterField
++        if isinstance(operation, AlterField) and self.is_same_field_operation(operation):
++            return [operation]
+         return super().reduce(operation, app_label)
+ 
+ 
+@@ -264,6 +273,9 @@ class AlterField(FieldOperation):
+                     field=self.field,
+                 ),
+             ]
++        # Check if the current operation can be reduced with another AlterField
++        if isinstance(operation, AlterField) and self.is_same_field_operation(operation):
++            return [operation]
+         return super().reduce(operation, app_label)
+ 
+ 
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..3ab6aa8593
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,5 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task, if you have learned any additional information about the task that should be added to the task description, or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Note that the task description can be changed by modifying the task_description.txt file directly. Anytime you execute commands that provide insight into the issue you are solving, you MUST add these insights to the task description before proceeding!
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 0000000000..96bed42ae2
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,40 @@
++Migration optimizer does not reduce multiple AlterField
++Description
++	
++Let's consider the following operations: 
++operations = [
++	migrations.AddField(
++		model_name=book,
++		name=title,
++		field=models.CharField(max_length=256, null=True),
++	),
++	migrations.AlterField(
++		model_name=book,
++		name=title,
++		field=models.CharField(max_length=128, null=True),
++	),
++	migrations.AlterField(
++		model_name=book,
++		name=title,
++		field=models.CharField(max_length=128, null=True, help_text=help),
++	),
++	migrations.AlterField(
++		model_name=book,
++		name=title,
++		field=models.CharField(max_length=128, null=True, help_text=help, default=None),
++	),
++]
++If I run the optimizer, I get only the AddField, as we could expect. However, if the AddField model is separated from the AlterField (e.g. because of a non-elidable migration, or inside a non-squashed migration), none of the AlterField are reduced:
++optimizer.optimize(operations[1:], books) 
++[<AlterField model_name='book', name='title', field=<django.db.models.fields.CharField>>,
++ <AlterField model_name='book', name='title', field=<django.db.models.fields.CharField>>,
++ <AlterField model_name='book', name='title', field=<django.db.models.fields.CharField>>]
++Indeed, the AlterField.reduce does not consider the the case where operation is also an AlterField. 
++Is this behaviour intended? If so, could it be documented? 
++Otherwise, would it make sense to add something like
++		if isinstance(operation, AlterField) and self.is_same_field_operation(
++			operation
++		):
++			return [operation]
++
++Added logic to the AlterField class to properly reduce multiple AlterField operations. Added verification step required to ensure this new behavior functions as expected within the Optimizer.
+diff --git a/tests/migrations/test_operations.py b/tests/migrations/test_operations.py
+index df12ff428d..58bb3cd309 100644
+--- a/tests/migrations/test_operations.py
++++ b/tests/migrations/test_operations.py
+@@ -5641,3 +5641,30 @@ class FieldOperationTests(SimpleTestCase):
+         self.assertIs(
+             operation.references_field("Through", "second", "migrations"), True
+         )
++
++class AlterFieldReductionTests(OperationTestBase):
++    def test_reduce_multiple_alter_fields(self):
++        operations = [
++            migrations.AlterField(
++                model_name="book",
++                name="title",
++                field=models.CharField(max_length=256, null=True),
++            ),
++            migrations.AlterField(
++                model_name="book",
++                name="title",
++                field=models.CharField(max_length=128, null=True),
++            ),
++            migrations.AlterField(
++                model_name="book",
++                name="title",
++                field=models.CharField(max_length=128, null=True, help_text="help"),
++            ),
++        ]
++        optimizer = migrations.optimizer.MigrationOptimizer()
++        reduced_operations = optimizer.optimize(operations, "books")
++        
++        # The reduced operations should retain only the last AlterField
++        self.assertEqual(len(reduced_operations), 1)
++        self.assertTrue(isinstance(reduced_operations[0], migrations.AlterField))
++        self.assertEqual(reduced_operations[0].field.help_text, "help")

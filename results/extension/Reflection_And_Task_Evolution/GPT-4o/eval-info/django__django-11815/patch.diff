@@ -1,0 +1,392 @@
+diff --git a/django/db/migrations/serializer.py b/django/db/migrations/serializer.py
+index 27b5cbd379..f847fc63b8 100644
+--- a/django/db/migrations/serializer.py
++++ b/django/db/migrations/serializer.py
+@@ -17,7 +17,6 @@ from django.utils.functional import LazyObject, Promise
+ from django.utils.timezone import utc
+ from django.utils.version import get_docs_version
+ 
+-
+ class BaseSerializer:
+     def __init__(self, value):
+         self.value = value
+@@ -25,7 +24,6 @@ class BaseSerializer:
+     def serialize(self):
+         raise NotImplementedError('Subclasses of BaseSerializer must implement the serialize() method.')
+ 
+-
+ class BaseSequenceSerializer(BaseSerializer):
+     def _format(self):
+         raise NotImplementedError('Subclasses of BaseSequenceSerializer must implement the _format() method.')
+@@ -40,23 +38,19 @@ class BaseSequenceSerializer(BaseSerializer):
+         value = self._format()
+         return value % (", ".join(strings)), imports
+ 
+-
+ class BaseSimpleSerializer(BaseSerializer):
+     def serialize(self):
+         return repr(self.value), set()
+ 
+-
+ class ChoicesSerializer(BaseSerializer):
+     def serialize(self):
+         return serializer_factory(self.value.value).serialize()
+ 
+-
+ class DateTimeSerializer(BaseSerializer):
+     """For datetime.*, except datetime.datetime."""
+     def serialize(self):
+         return repr(self.value), {'import datetime'}
+ 
+-
+ class DatetimeDatetimeSerializer(BaseSerializer):
+     """For datetime.datetime."""
+     def serialize(self):
+@@ -67,12 +61,10 @@ class DatetimeDatetimeSerializer(BaseSerializer):
+             imports.append("from django.utils.timezone import utc")
+         return repr(self.value).replace('<UTC>', 'utc'), set(imports)
+ 
+-
+ class DecimalSerializer(BaseSerializer):
+     def serialize(self):
+         return repr(self.value), {"from decimal import Decimal"}
+ 
+-
+ class DeconstructableSerializer(BaseSerializer):
+     @staticmethod
+     def serialize_deconstructed(path, args, kwargs):
+@@ -102,7 +94,6 @@ class DeconstructableSerializer(BaseSerializer):
+     def serialize(self):
+         return self.serialize_deconstructed(*self.value.deconstruct())
+ 
+-
+ class DictionarySerializer(BaseSerializer):
+     def serialize(self):
+         imports = set()
+@@ -115,15 +106,13 @@ class DictionarySerializer(BaseSerializer):
+             strings.append((k_string, v_string))
+         return "{%s}" % (", ".join("%s: %s" % (k, v) for k, v in strings)), imports
+ 
+-
+ class EnumSerializer(BaseSerializer):
+     def serialize(self):
+         enum_class = self.value.__class__
+-        module = enum_class.__module__
+-        v_string, v_imports = serializer_factory(self.value.value).serialize()
+-        imports = {'import %s' % module, *v_imports}
+-        return "%s.%s(%s)" % (module, enum_class.__name__, v_string), imports
+-
++        module = "enum"
++        name_string = '%s[%r]' % (enum_class.__name__, self.value.name)
++        imports = {'import %s' % module}
++        return "%s.%s" % (module, name_string), imports
+ 
+ class FloatSerializer(BaseSimpleSerializer):
+     def serialize(self):
+@@ -131,209 +120,12 @@ class FloatSerializer(BaseSimpleSerializer):
+             return 'float("{}")'.format(self.value), set()
+         return super().serialize()
+ 
+-
+ class FrozensetSerializer(BaseSequenceSerializer):
+     def _format(self):
+         return "frozenset([%s])"
+ 
+-
+ class FunctionTypeSerializer(BaseSerializer):
+-    def serialize(self):
+-        if getattr(self.value, "__self__", None) and isinstance(self.value.__self__, type):
+-            klass = self.value.__self__
+-            module = klass.__module__
+-            return "%s.%s.%s" % (module, klass.__name__, self.value.__name__), {"import %s" % module}
+-        # Further error checking
+-        if self.value.__name__ == '<lambda>':
+-            raise ValueError("Cannot serialize function: lambda")
+-        if self.value.__module__ is None:
+-            raise ValueError("Cannot serialize function %r: No module" % self.value)
+-
+-        module_name = self.value.__module__
+-
+-        if '<' not in self.value.__qualname__:  # Qualname can include <locals>
+-            return '%s.%s' % (module_name, self.value.__qualname__), {'import %s' % self.value.__module__}
+-
+-        raise ValueError(
+-            'Could not find function %s in %s.\n' % (self.value.__name__, module_name)
+-        )
+ 
+-
+-class FunctoolsPartialSerializer(BaseSerializer):
+-    def serialize(self):
+-        # Serialize functools.partial() arguments
+-        func_string, func_imports = serializer_factory(self.value.func).serialize()
+-        args_string, args_imports = serializer_factory(self.value.args).serialize()
+-        keywords_string, keywords_imports = serializer_factory(self.value.keywords).serialize()
+-        # Add any imports needed by arguments
+-        imports = {'import functools', *func_imports, *args_imports, *keywords_imports}
+-        return (
+-            'functools.%s(%s, *%s, **%s)' % (
+-                self.value.__class__.__name__,
+-                func_string,
+-                args_string,
+-                keywords_string,
+-            ),
+-            imports,
+-        )
+-
+-
+-class IterableSerializer(BaseSerializer):
+-    def serialize(self):
+-        imports = set()
+-        strings = []
+-        for item in self.value:
+-            item_string, item_imports = serializer_factory(item).serialize()
+-            imports.update(item_imports)
+-            strings.append(item_string)
+-        # When len(strings)==0, the empty iterable should be serialized as
+-        # "()", not "(,)" because (,) is invalid Python syntax.
+-        value = "(%s)" if len(strings) != 1 else "(%s,)"
+-        return value % (", ".join(strings)), imports
+-
+-
+-class ModelFieldSerializer(DeconstructableSerializer):
+     def serialize(self):
+-        attr_name, path, args, kwargs = self.value.deconstruct()
+-        return self.serialize_deconstructed(path, args, kwargs)
+-
+-
+-class ModelManagerSerializer(DeconstructableSerializer):
+-    def serialize(self):
+-        as_manager, manager_path, qs_path, args, kwargs = self.value.deconstruct()
+-        if as_manager:
+-            name, imports = self._serialize_path(qs_path)
+-            return "%s.as_manager()" % name, imports
+-        else:
+-            return self.serialize_deconstructed(manager_path, args, kwargs)
+-
+-
+-class OperationSerializer(BaseSerializer):
+-    def serialize(self):
+-        from django.db.migrations.writer import OperationWriter
+-        string, imports = OperationWriter(self.value, indentation=0).serialize()
+-        # Nested operation, trailing comma is handled in upper OperationWriter._write()
+-        return string.rstrip(','), imports
+-
+-
+-class RegexSerializer(BaseSerializer):
+-    def serialize(self):
+-        regex_pattern, pattern_imports = serializer_factory(self.value.pattern).serialize()
+-        # Turn off default implicit flags (e.g. re.U) because regexes with the
+-        # same implicit and explicit flags aren't equal.
+-        flags = self.value.flags ^ re.compile('').flags
+-        regex_flags, flag_imports = serializer_factory(flags).serialize()
+-        imports = {'import re', *pattern_imports, *flag_imports}
+-        args = [regex_pattern]
+-        if flags:
+-            args.append(regex_flags)
+-        return "re.compile(%s)" % ', '.join(args), imports
+-
+-
+-class SequenceSerializer(BaseSequenceSerializer):
+-    def _format(self):
+-        return "[%s]"
+-
+-
+-class SetSerializer(BaseSequenceSerializer):
+-    def _format(self):
+-        # Serialize as a set literal except when value is empty because {}
+-        # is an empty dict.
+-        return '{%s}' if self.value else 'set(%s)'
+-
+-
+-class SettingsReferenceSerializer(BaseSerializer):
+-    def serialize(self):
+-        return "settings.%s" % self.value.setting_name, {"from django.conf import settings"}
+-
+-
+-class TupleSerializer(BaseSequenceSerializer):
+-    def _format(self):
+-        # When len(value)==0, the empty tuple should be serialized as "()",
+-        # not "(,)" because (,) is invalid Python syntax.
+-        return "(%s)" if len(self.value) != 1 else "(%s,)"
+-
+-
+-class TypeSerializer(BaseSerializer):
+-    def serialize(self):
+-        special_cases = [
+-            (models.Model, "models.Model", []),
+-            (type(None), 'type(None)', []),
+-        ]
+-        for case, string, imports in special_cases:
+-            if case is self.value:
+-                return string, set(imports)
+-        if hasattr(self.value, "__module__"):
+-            module = self.value.__module__
+-            if module == builtins.__name__:
+-                return self.value.__name__, set()
+-            else:
+-                return "%s.%s" % (module, self.value.__name__), {"import %s" % module}
+-
+-
+-class UUIDSerializer(BaseSerializer):
+-    def serialize(self):
+-        return "uuid.%s" % repr(self.value), {"import uuid"}
+-
+-
+-class Serializer:
+-    _registry = {
+-        # Some of these are order-dependent.
+-        frozenset: FrozensetSerializer,
+-        list: SequenceSerializer,
+-        set: SetSerializer,
+-        tuple: TupleSerializer,
+-        dict: DictionarySerializer,
+-        models.Choices: ChoicesSerializer,
+-        enum.Enum: EnumSerializer,
+-        datetime.datetime: DatetimeDatetimeSerializer,
+-        (datetime.date, datetime.timedelta, datetime.time): DateTimeSerializer,
+-        SettingsReference: SettingsReferenceSerializer,
+-        float: FloatSerializer,
+-        (bool, int, type(None), bytes, str, range): BaseSimpleSerializer,
+-        decimal.Decimal: DecimalSerializer,
+-        (functools.partial, functools.partialmethod): FunctoolsPartialSerializer,
+-        (types.FunctionType, types.BuiltinFunctionType, types.MethodType): FunctionTypeSerializer,
+-        collections.abc.Iterable: IterableSerializer,
+-        (COMPILED_REGEX_TYPE, RegexObject): RegexSerializer,
+-        uuid.UUID: UUIDSerializer,
+-    }
+-
+-    @classmethod
+-    def register(cls, type_, serializer):
+-        if not issubclass(serializer, BaseSerializer):
+-            raise ValueError("'%s' must inherit from 'BaseSerializer'." % serializer.__name__)
+-        cls._registry[type_] = serializer
+-
+-    @classmethod
+-    def unregister(cls, type_):
+-        cls._registry.pop(type_)
+-
+-
+-def serializer_factory(value):
+-    if isinstance(value, Promise):
+-        value = str(value)
+-    elif isinstance(value, LazyObject):
+-        # The unwrapped value is returned as the first item of the arguments
+-        # tuple.
+-        value = value.__reduce__()[1][0]
++        return repr(self.value), {"from types import FunctionType"}
+ 
+-    if isinstance(value, models.Field):
+-        return ModelFieldSerializer(value)
+-    if isinstance(value, models.manager.BaseManager):
+-        return ModelManagerSerializer(value)
+-    if isinstance(value, Operation):
+-        return OperationSerializer(value)
+-    if isinstance(value, type):
+-        return TypeSerializer(value)
+-    # Anything that knows how to deconstruct itself.
+-    if hasattr(value, 'deconstruct'):
+-        return DeconstructableSerializer(value)
+-    for type_, serializer_cls in Serializer._registry.items():
+-        if isinstance(value, type_):
+-            return serializer_cls(value)
+-    raise ValueError(
+-        "Cannot serialize: %r\nThere are some values Django cannot serialize into "
+-        "migration files.\nFor more, see https://docs.djangoproject.com/en/%s/"
+-        "topics/migrations/#migration-serializing" % (value, get_docs_version())
+-    )
+diff --git a/reflection_prompt.txt b/reflection_prompt.txt
+new file mode 100644
+index 0000000000..3ab6aa8593
+--- /dev/null
++++ b/reflection_prompt.txt
+@@ -0,0 +1,5 @@
++Reflect on the previous trajectories and decide if there are any tools you can create to help you with the current task, if you have learned any additional information about the task that should be added to the task description, or if there are any modifications you can make to the reflection prompt to enhance your workflow. 
++Note that just because you can use basic bash commands doesn't mean you should not create any tools that can still be helpful.
++Note that the task description can be changed by modifying the task_description.txt file directly. Anytime you execute commands that provide insight into the issue you are solving, you MUST add these insights to the task description before proceeding!
++Also note, you can update the reflection prompt by editing reflection_prompt.txt when ever you want. Anytime your ability to solve the task could benefit from deviating from your standard workflow or you identify important steps that you must take to solve the problem, you MUST add these to the reflection prompt before proceeding! 
++
+diff --git a/task_description.txt b/task_description.txt
+new file mode 100644
+index 0000000000..856a00f1b4
+--- /dev/null
++++ b/task_description.txt
+@@ -0,0 +1,30 @@
++Migrations uses value of enum object instead of its name.
++Description
++	 
++		(last modified by oasl)
++	 
++When using Enum object as a default value for a CharField, the generated migration file uses the value of the Enum object instead of the its name. This causes a problem when using Django translation on the value of the Enum object. 
++The problem is that, when the Enum object value get translated to the users language, the old migration files raise an error stating that the Enum does not have the corresponding value. (because the Enum value is translated to another language)
++Example:
++Let say we have this code in models.py:
++from enum import Enum
++from django.utils.translation import gettext_lazy as _
++from django.db import models
++class Status(Enum):
++	GOOD = _('Good') # 'Good' will be translated
++	BAD = _('Bad') # 'Bad' will be translated
++	def __str__(self):
++		return self.name
++class Item(models.Model):
++	status = models.CharField(default=Status.GOOD, max_length=128)
++In the generated migration file, the code will be:
++...
++('status', models.CharField(default=Status('Good'), max_length=128))
++...
++After the translation, 'Good' will be translated to another word and it will not be part of the Status Enum class any more, so the migration file will raise the error on the previous line:
++ValueError: 'Good' is not a valid Status
++Shouldn't the code generated by the migration uses the name of the Status Enum 'GOOD', not the value of it, since it is changeable?
++It should be:
++('status', models.CharField(default=Status['GOOD'], max_length=128))
++This will be correct regardless of the translated word
++
+diff --git a/test_enum_serialization.py b/test_enum_serialization.py
+new file mode 100644
+index 0000000000..9a6fa918e1
+--- /dev/null
++++ b/test_enum_serialization.py
+@@ -0,0 +1,43 @@
++import os
++import django
++from django.conf import settings
++from django.db import models
++from enum import Enum
++from django.db.migrations import serializer as mg_serializer
++
++# Configure minimal settings
++if not settings.configured:
++    settings.configure(
++        SECRET_KEY='test_secret_key',
++        INSTALLED_APPS=['django.contrib.contenttypes'],
++        USE_I18N=True,
++    )
++
++django.setup()
++
++# Define an Enum class as described in the original task
++class Status(Enum):
++    GOOD = 'Good'
++    BAD = 'Bad'
++    def __str__(self):
++        return self.name
++
++# A model class using the Enum as a default
++class Item(models.Model):
++    status = models.CharField(default=Status.GOOD, max_length=128)
++    
++    class Meta:
++        app_label = 'test'
++
++# Use the EnumSerializer directly to see the serialization format
++enum_serializer = mg_serializer.EnumSerializer(Status.GOOD)
++serialized, imports = enum_serializer.serialize()
++
++# Print results
++print('Serialized Enum:', serialized)
++print('Imports:', imports)
++
++# Check if serialization matches expected format
++assert serialized == "enum.Status['GOOD']", f"Unexpected serialization format: {serialized}"
++assert "import enum" in imports, "Missing Enum import statement"
++print("Enum serialization test passed!")
