@@ -1,0 +1,109 @@
+diff --git a/django/db/models/fields/json.py b/django/db/models/fields/json.py
+index fdca700c9d..731562d0a1 100644
+--- a/django/db/models/fields/json.py
++++ b/django/db/models/fields/json.py
+@@ -129,16 +129,22 @@ class JSONField(CheckFieldDefaultMixin, Field):
+ def compile_json_path(key_transforms, include_root=True):
+     path = ["$"] if include_root else []
+     for key_transform in key_transforms:
+-        try:
+-            num = int(key_transform)
+-        except ValueError:  # non-integer
++        # Only treat non-string values as array indices. Numeric-looking strings
++        # are valid object keys and must be quoted in JSON path expressions for
++        # backends without native JSON support (SQLite, MySQL, Oracle).
++        if not isinstance(key_transform, str):
++            try:
++                num = int(key_transform)
++            except (ValueError, TypeError):
++                path.append(".")
++                path.append(json.dumps(key_transform))
++            else:
++                path.append("[%s]" % num)
++        else:
+             path.append(".")
+             path.append(json.dumps(key_transform))
+-        else:
+-            path.append("[%s]" % num)
+     return "".join(path)
+ 
+-
+ class DataContains(PostgresOperatorLookup):
+     lookup_name = "contains"
+     postgres_operator = "@>"
+@@ -307,18 +313,37 @@ class KeyTransform(Transform):
+ 
+     def __init__(self, key_name, *args, **kwargs):
+         super().__init__(*args, **kwargs)
++        # Preserve original key value and coerce numeric-looking strings
++        # to ints for KeyTransform instances so array indices are
++        # represented as integers. Keep a stringified key_name for
++        # compatibility where needed.
++        if isinstance(key_name, str):
++            try:
++                raw = int(key_name)
++            except ValueError:
++                raw = key_name
++        else:
++            raw = key_name
++        self.raw_key_name = raw
+         self.key_name = str(key_name)
+ 
+     def preprocess_lhs(self, compiler, connection):
+-        key_transforms = [self.key_name]
++        # Use the original key values so integers remain integers and can be
++        # treated as array indices by compile_json_path on backends without
++        # native JSON support. Keep stringified key_name available for other
++        # code paths.
++        key_transforms = [self.raw_key_name]
+         previous = self.lhs
+         while isinstance(previous, KeyTransform):
+-            key_transforms.insert(0, previous.key_name)
++            key_transforms.insert(0, previous.raw_key_name)
+             previous = previous.lhs
+         lhs, params = compiler.compile(previous)
+         if connection.vendor == "oracle":
+-            # Escape string-formatting.
+-            key_transforms = [key.replace("%", "%%") for key in key_transforms]
++            # Escape string-formatting only for string keys.
++            key_transforms = [
++                (key.replace("%", "%%") if isinstance(key, str) else key)
++                for key in key_transforms
++            ]
+         return lhs, params, key_transforms
+ 
+     def as_mysql(self, compiler, connection):
+@@ -339,10 +364,13 @@ class KeyTransform(Transform):
+         if len(key_transforms) > 1:
+             sql = "(%s %s %%s)" % (lhs, self.postgres_nested_operator)
+             return sql, tuple(params) + (key_transforms,)
++        # Decide whether the single key is an int (array index) or a string key
++        # based on the original raw key value.
++        last_key = key_transforms[-1]
+         try:
+-            lookup = int(self.key_name)
+-        except ValueError:
+-            lookup = self.key_name
++            lookup = int(last_key)
++        except (ValueError, TypeError):
++            lookup = str(last_key)
+         return "(%s %s %%s)" % (lhs, self.postgres_operator), tuple(params) + (lookup,)
+ 
+     def as_sqlite(self, compiler, connection):
+@@ -563,6 +591,16 @@ KeyTransform.register_lookup(KeyTransformGte)
+ 
+ class KeyTransformFactory:
+     def __init__(self, key_name):
++        # If the key name comes from a dotted lookup (e.g. value__1__0),
++        # convert numeric-looking strings to integers so that array
++        # indices are represented as ints. Keys provided directly (e.g.
++        # value__has_key='1111') remain strings and will be treated as
++        # object keys by compile_json_path.
++        if isinstance(key_name, str):
++            try:
++                key_name = int(key_name)
++            except ValueError:
++                pass
+         self.key_name = key_name
+ 
+     def __call__(self, *args, **kwargs):

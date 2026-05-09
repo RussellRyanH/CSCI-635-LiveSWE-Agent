@@ -1,0 +1,119 @@
+diff --git a/requests/models.py b/requests/models.py
+index e7d292d5..c1cecfc4 100644
+--- a/requests/models.py
++++ b/requests/models.py
+@@ -403,7 +403,7 @@ class PreparedRequest(RequestEncodingMixin, RequestHooksMixin):
+                 host = self._get_idna_encoded_host(host)
+             except UnicodeError:
+                 raise InvalidURL('URL has an invalid label.')
+-        elif host.startswith(u'*'):
++        elif host.startswith(u'*') or host.startswith(u'.') or u'..' in host:
+             raise InvalidURL('URL has an invalid label.')
+ 
+         # Carefully reconstruct the network location
+diff --git a/tools/edit.py b/tools/edit.py
+new file mode 100755
+index 00000000..0adde9d2
+--- /dev/null
++++ b/tools/edit.py
+@@ -0,0 +1,100 @@
++\
++#!/usr/bin/env python3
++import argparse
++import difflib
++import io
++import os
++import re
++import sys
++from typing import List, Tuple
++
++def parse_replace_arg(arg: str) -> Tuple[str, str]:
++    if "::" not in arg:
++        raise argparse.ArgumentTypeError("Each --replace must be in the form PATTERN::REPLACEMENT")
++    pat, repl = arg.split("::", 1)
++    return pat, repl
++
++def apply_replacements(text: str, ops: List[Tuple[str, str]], use_regex: bool, strict: bool) -> Tuple[str, List[Tuple[str, int]]]:
++    counts = []
++    new_text = text
++    for pat, repl in ops:
++        if use_regex:
++            try:
++                compiled = re.compile(pat, flags=re.MULTILINE | re.DOTALL)
++            except re.error as e:
++                print(f"[edit.py] Invalid regex pattern: {pat!r}: {e}", file=sys.stderr)
++                sys.exit(2)
++            new_part, n = compiled.subn(repl, new_text)
++        else:
++            n = new_text.count(pat)
++            new_part = new_text.replace(pat, repl)
++        if strict and n == 0:
++            print(f"[edit.py] Pattern not found (strict mode): {pat!r}", file=sys.stderr)
++            sys.exit(3)
++        counts.append((pat, n))
++        new_text = new_part
++    return new_text, counts
++
++def main():
++    p = argparse.ArgumentParser(description="In-place file editor to apply multiple replacements.")
++    p.add_argument("--path", required=True, help="File path to edit")
++    p.add_argument("--replace", action="append", default=[], type=parse_replace_arg,
++                   help="Replacement in the form PATTERN::REPLACEMENT. Can be provided multiple times.")
++    p.add_argument("--regex", action="store_true", help="Interpret PATTERNs as regular expressions")
++    p.add_argument("--encoding", default="utf-8", help="File encoding (default: utf-8)")
++    p.add_argument("--dry-run", action="store_true", help="Preview changes without writing")
++    p.add_argument("--strict", action="store_true", help="Fail if any pattern is not found")
++    p.add_argument("--show-diff", action="store_true", help="Show unified diff for changes")
++    args = p.parse_args()
++
++    path = args.path
++    if not os.path.exists(path):
++        print(f"[edit.py] File not found: {path}", file=sys.stderr)
++        sys.exit(1)
++
++    try:
++        with io.open(path, "r", encoding=args.encoding, newline="") as f:
++            original = f.read()
++    except Exception as e:
++        print(f"[edit.py] Failed to read file {path}: {e}", file=sys.stderr)
++        sys.exit(1)
++
++    if not args.replace:
++        print("[edit.py] No --replace operations provided. Nothing to do.", file=sys.stderr)
++        sys.exit(0)
++
++    modified, counts = apply_replacements(original, args.replace, args.regex, args.strict)
++
++    total_changes = sum(n for _, n in counts)
++    for pat, n in counts:
++        print(f"[edit.py] Replacements for pattern: {pat!r}: {n}")
++
++    if original == modified:
++        print("[edit.py] No changes produced by the provided replacements.")
++        sys.exit(0)
++
++    if args.show_diff or args.dry-run:
++        diff = difflib.unified_diff(
++            original.splitlines(keepends=True),
++            modified.splitlines(keepends=True),
++            fromfile=f"a/{path}",
++            tofile=f"b/{path}",
++            n=3,
++        )
++        sys.stdout.writelines(diff)
++
++    if args.dry-run:
++        print("[edit.py] Dry run complete. No changes written.")
++        sys.exit(0)
++
++    try:
++        with io.open(path, "w", encoding=args.encoding, newline="") as f:
++            f.write(modified)
++    except Exception as e:
++        print(f"[edit.py] Failed to write file {path}: {e}", file=sys.stderr)
++        sys.exit(1)
++
++    print(f"[edit.py] Wrote changes to {path}. Total replacements: {total_changes}")
++
++if __name__ == "__main__":
++    main()

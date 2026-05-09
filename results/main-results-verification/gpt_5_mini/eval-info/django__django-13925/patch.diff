@@ -1,0 +1,93 @@
+diff --git a/django/db/models/base.py b/django/db/models/base.py
+index 4038859cfa..7f422df0c6 100644
+--- a/django/db/models/base.py
++++ b/django/db/models/base.py
+@@ -1299,6 +1299,7 @@ class Model(metaclass=ModelBase):
+     def _check_default_pk(cls):
+         if (
+             cls._meta.pk.auto_created and
++            not (hasattr(cls._meta.pk, 'remote_field') and getattr(cls._meta.pk.remote_field, 'parent_link', False)) and
+             not settings.is_overridden('DEFAULT_AUTO_FIELD') and
+             not cls._meta.app_config._is_default_auto_field_overridden
+         ):
+diff --git a/fakeapp/__init__.py b/fakeapp/__init__.py
+new file mode 100644
+index 0000000000..b42c80f568
+--- /dev/null
++++ b/fakeapp/__init__.py
+@@ -0,0 +1 @@
++default_app_config = "fakeapp.apps.FakeAppConfig"
+diff --git a/fakeapp/apps.py b/fakeapp/apps.py
+new file mode 100644
+index 0000000000..58fde80af9
+--- /dev/null
++++ b/fakeapp/apps.py
+@@ -0,0 +1,4 @@
++from django.apps import AppConfig
++
++class FakeAppConfig(AppConfig):
++    name = "fakeapp"
+diff --git a/run_check.py b/run_check.py
+new file mode 100644
+index 0000000000..57a110e4a7
+--- /dev/null
++++ b/run_check.py
+@@ -0,0 +1,58 @@
++import sys
++from django.conf import settings
++
++settings.configure(
++    INSTALLED_APPS=['fakeapp'],
++    DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}},
++    DEFAULT_AUTO_FIELD='django.db.models.AutoField',
++)
++
++import django
++django.setup()
++
++# Monkeypatch is_overridden to simulate the test behavior where
++# DEFAULT_AUTO_FIELD set to AutoField is treated as not overridden.
++_original_is_overridden = settings.is_overridden
++def mocked_is_overridden(name):
++    if name == 'DEFAULT_AUTO_FIELD':
++        return False
++    return _original_is_overridden(name)
++settings.is_overridden = mocked_is_overridden
++
++from django.db import models
++from django.core import checks
++
++class Entity(models.Model):
++    id = models.BigAutoField(primary_key=True)
++    class Meta:
++        app_label = 'fakeapp'
++
++class User(Entity):
++    class Meta:
++        app_label = 'fakeapp'
++
++class ModelWithoutPk(models.Model):
++    class Meta:
++        app_label = 'fakeapp'
++
++def describe(model):
++    pk = model._meta.pk
++    return {
++        'model': model.__name__,
++        'pk_type': type(pk).__name__,
++        'pk_name': getattr(pk, 'name', None),
++        'pk_attname': getattr(pk, 'attname', None),
++        'pk_auto_created': getattr(pk, 'auto_created', None),
++        'pk_model': getattr(pk, 'model', None).__name__ if getattr(pk, 'model', None) else None,
++        'pk_primary_key': getattr(pk, 'primary_key', None),
++    }
++
++print("Entity pk:", describe(Entity))
++print("User pk:", describe(User))
++print("ModelWithoutPk pk:", describe(ModelWithoutPk))
++
++user_warnings = User._check_default_pk()
++nopk_warnings = ModelWithoutPk._check_default_pk()
++
++print("User warnings:", user_warnings)
++print("ModelWithoutPk warnings:", nopk_warnings)

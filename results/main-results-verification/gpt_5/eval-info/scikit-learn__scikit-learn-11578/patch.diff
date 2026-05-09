@@ -1,0 +1,117 @@
+diff --git a/sklearn/linear_model/logistic.py b/sklearn/linear_model/logistic.py
+index e4ea696ce..faefd80a0 100644
+--- a/sklearn/linear_model/logistic.py
++++ b/sklearn/linear_model/logistic.py
+@@ -922,7 +922,7 @@ def _log_reg_scoring_path(X, y, train, test, pos_class=None, Cs=10,
+         check_input=False, max_squared_sum=max_squared_sum,
+         sample_weight=sample_weight)
+ 
+-    log_reg = LogisticRegression(fit_intercept=fit_intercept)
++    log_reg = LogisticRegression(fit_intercept=fit_intercept, multi_class=multi_class)
+ 
+     # The score method of Logistic Regression has a classes_ attribute.
+     if multi_class == 'ovr':
+diff --git a/verify_logistic_scoring.py b/verify_logistic_scoring.py
+new file mode 100644
+index 000000000..6254d159b
+--- /dev/null
++++ b/verify_logistic_scoring.py
+@@ -0,0 +1,98 @@
++import numpy as np
++from sklearn import preprocessing, linear_model, utils
++from sklearn.metrics import log_loss
++
++def ovr_approach(decision_function):
++    probs = 1. / (1. + np.exp(-decision_function))
++    probs = probs / probs.sum(axis=1).reshape((probs.shape[0], -1))
++    return probs
++
++def score_from_probs(probs, y_bin):
++    # negative log-loss as used by sklearn (higher is better for neg_log_loss)
++    return (y_bin*np.log(probs)).sum(axis=1).mean()
++
++np.random.seed(seed=1234)
++
++samples  = 200
++features = 5
++folds    = 10
++
++scorer = 'neg_log_loss'
++
++X = np.random.random(size=(samples, features))
++y = np.random.choice(['a', 'b', 'c'], size=samples)
++
++test  = np.random.choice(range(samples), size=int(samples/float(folds)), replace=False)
++train = [idx for idx in range(samples) if idx not in test]
++
++# Binarize the labels for y[test]
++lb = preprocessing.label.LabelBinarizer()
++lb.fit(y[test])
++y_bin = lb.transform(y[test])
++
++# Get coefs and scores from scoring path with multinomial
++(coefs, Cs, scores, n_iter) = linear_model.logistic._log_reg_scoring_path(
++    X, y, train, test, fit_intercept=True, scoring=scorer, multi_class='multinomial'
++)
++
++# Choose a single C to look at, for simplicity
++c_index = 0
++coefs_c = coefs[c_index]
++scores_c = scores[c_index]
++
++# Build LogisticRegression without/with multinomial to compare probabilities
++existing_log_reg = linear_model.LogisticRegression(fit_intercept=True)
++existing_log_reg.coef_      = coefs_c[:, :-1]
++existing_log_reg.intercept_ = coefs_c[:, -1]
++
++new_log_reg = linear_model.LogisticRegression(fit_intercept=True, multi_class='multinomial')
++new_log_reg.coef_      = coefs_c[:, :-1]
++new_log_reg.intercept_ = coefs_c[:, -1]
++
++X_test = X[test]
++existing_dec_fn = existing_log_reg.decision_function(X_test)
++new_dec_fn = new_log_reg.decision_function(X_test)
++
++existing_probs_builtin = existing_log_reg.predict_proba(X_test)
++new_probs_builtin = new_log_reg.predict_proba(X_test)
++
++# OvR approach
++existing_probs_ovr = ovr_approach(existing_dec_fn)
++new_probs_ovr = ovr_approach(new_dec_fn)
++
++# multinomial approach
++existing_probs_multi = utils.extmath.softmax(existing_dec_fn)
++new_probs_multi = utils.extmath.softmax(new_dec_fn)
++
++print("score returned by _log_reg_scoring_path (multinomial requested)")
++print(scores_c)
++
++print("OvR LR decision function == multinomial LR decision function?")
++print(np.allclose(existing_dec_fn, new_dec_fn))
++
++print("score calculated via OvR method (either decision function)")
++print(score_from_probs(existing_probs_ovr, y_bin))
++
++print("score calculated via multinomial method (either decision function)")
++print(score_from_probs(existing_probs_multi, y_bin))
++
++print("probs predicted by existing_log_reg.predict_proba() == probs generated via the OvR approach?")
++print(np.allclose(existing_probs_builtin, existing_probs_ovr))
++
++print("probs predicted by existing_log_reg.predict_proba() == probs generated via the multinomial approach?")
++print(np.any(np.isclose(existing_probs_builtin, existing_probs_multi)))
++
++print("probs predicted by new_log_reg.predict_proba() == probs generated via the OvR approach?")
++print(np.allclose(new_probs_builtin, new_probs_ovr))
++
++print("probs predicted by new_log_reg.predict_proba() == probs generated via the multinomial approach?")
++print(np.any(np.isclose(new_probs_builtin, new_probs_multi)))
++
++# The key check: the score produced by _log_reg_scoring_path should match multinomial,
++# not OvR, when multi_class='multinomial'
++score_ovr = score_from_probs(existing_probs_ovr, y_bin)
++score_multi = score_from_probs(existing_probs_multi, y_bin)
++print("Does returned score match multinomial (softmax) score?")
++print(np.isclose(scores_c, score_multi))
++print("Does returned score match OvR score?")
++print(np.isclose(scores_c, score_ovr))
